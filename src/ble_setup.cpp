@@ -49,6 +49,7 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
             Serial.println("  → Credentials saved. Rebooting in 2s...");
             delay(2000);
             Serial.println("  → Rebooting now!");
+            Serial.flush();
             ESP.restart();
         }
     }
