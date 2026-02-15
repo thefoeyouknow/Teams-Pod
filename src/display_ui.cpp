@@ -70,7 +70,7 @@ void drawBootScreen() {
         centerText("Puck", 105);
 
         display.setFont(&FreeSans9pt7b);
-        centerText("v0.50 MVP", 135);
+        centerText("v0.51 MVP", 135);
 
         display.setFont(NULL);
         display.setTextSize(1);

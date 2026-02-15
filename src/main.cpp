@@ -78,7 +78,7 @@ void updateAndDisplayPresence();
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n=== Teams Puck v0.50 ===\n");
+    Serial.println("\n=== Teams Puck v0.51 ===\n");
 
     // --- Factory reset: BOOT held on power-up → wipe NVS and reboot ---
     pinMode(BOOT_BUTTON, INPUT_PULLUP);
