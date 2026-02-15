@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teams Puck Setup</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#16213e;border-radius:16px;padding:28px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+h1{font-size:1.5rem;text-align:center;margin-bottom:4px;color:#fff}
+.sub{text-align:center;font-size:.85rem;color:#888;margin-bottom:20px}
+label{display:block;font-size:.85rem;color:#aaa;margin:12px 0 4px}
+input{width:100%;padding:10px 12px;border:1px solid #333;border-radius:8px;background:#0f3460;color:#fff;font-size:1rem;outline:none}
+input:focus{border-color:#5c9eff}
+input::placeholder{color:#555}
+.row{display:flex;gap:8px}
+.row input{flex:1}
+button{width:100%;padding:12px;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;margin-top:16px;transition:background .2s}
+#btnConnect{background:#5c9eff;color:#fff}
+#btnConnect:hover{background:#4a8ae6}
+#btnConnect:disabled{background:#333;color:#666;cursor:not-allowed}
+#btnSave{background:#22c55e;color:#fff;display:none}
+#btnSave:hover{background:#1aad52}
+#btnSave:disabled{background:#333;color:#666;cursor:not-allowed}
+.status{text-align:center;margin-top:12px;font-size:.9rem;min-height:1.2em}
+.ok{color:#22c55e}.err{color:#ef4444}.info{color:#5c9eff}
+.fields{display:none}
+.help{font-size:.75rem;color:#666;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#x1f7e2; Teams Puck Setup</h1>
+  <p class="sub">Configure via Bluetooth</p>
+
+  <button id="btnConnect">Connect to Teams-Puck</button>
+  <div id="status" class="status"></div>
+
+  <div class="fields" id="fields">
+    <label>WiFi SSID</label>
+    <input id="ssid" placeholder="Your WiFi network">
+
+    <label>WiFi Password</label>
+    <input id="pass" type="password" placeholder="WiFi password">
+
+    <label>Azure App Client ID</label>
+    <input id="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+
+    <label>Azure Tenant ID</label>
+    <input id="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+
+    <button id="btnSave">Save &amp; Reboot Puck</button>
+  </div>
+</div>
+
+<script>
+// BLE UUIDs — must match ble_setup.h
+const SVC  = 0x00FF;
+const UUID = {
+  ssid:     '0001ff01-0000-1000-8000-00805f9b34fb',
+  password: '0001ff02-0000-1000-8000-00805f9b34fb',
+  clientId: '0001ff03-0000-1000-8000-00805f9b34fb',
+  tenantId: '0001ff04-0000-1000-8000-00805f9b34fb',
+  save:     '0001ff05-0000-1000-8000-00805f9b34fb'
+};
+
+let svc = null;
+const $ = id => document.getElementById(id);
+const stat = (msg, cls) => { $('status').textContent = msg; $('status').className = 'status ' + cls; };
+
+$('btnConnect').addEventListener('click', async () => {
+  try {
+    stat('Scanning for Teams-Puck...', 'info');
+    const dev = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'Teams-Puck' }],
+      optionalServices: [SVC]
+    });
+    stat('Connecting...', 'info');
+    const server = await dev.gatt.connect();
+    svc = await server.getPrimaryService(SVC);
+    stat('Connected!', 'ok');
+    $('fields').style.display = 'block';
+    $('btnSave').style.display = 'block';
+    $('btnConnect').disabled = true;
+    $('btnConnect').textContent = 'Connected ✓';
+    // try to read existing values
+    try {
+      const c = await svc.getCharacteristic(UUID.clientId);
+      const v = await c.readValue();
+      const s = new TextDecoder().decode(v);
+      if (s) $('clientId').value = s;
+    } catch(e){}
+    try {
+      const c = await svc.getCharacteristic(UUID.tenantId);
+      const v = await c.readValue();
+      const s = new TextDecoder().decode(v);
+      if (s) $('tenantId').value = s;
+    } catch(e){}
+  } catch(e) {
+    stat('Connection failed: ' + e.message, 'err');
+  }
+});
+
+$('btnSave').addEventListener('click', async () => {
+  const ssid = $('ssid').value.trim();
+  const pass = $('pass').value;
+  const cid  = $('clientId').value.trim();
+  const tid  = $('tenantId').value.trim();
+  if (!ssid) { stat('SSID is required', 'err'); return; }
+  if (!cid || !tid) { stat('Client ID and Tenant ID are required', 'err'); return; }
+  try {
+    $('btnSave').disabled = true;
+    stat('Writing credentials...', 'info');
+    const enc = new TextEncoder();
+    const write = async (uuid, val) => {
+      const c = await svc.getCharacteristic(uuid);
+      await c.writeValue(enc.encode(val));
+    };
+    await write(UUID.ssid, ssid);
+    await write(UUID.password, pass);
+    await write(UUID.clientId, cid);
+    await write(UUID.tenantId, tid);
+    stat('Saving & rebooting Puck...', 'info');
+    await write(UUID.save, '1');
+    stat('Done! Puck is rebooting. Close this page.', 'ok');
+  } catch(e) {
+    stat('Write failed: ' + e.message, 'err');
+    $('btnSave').disabled = false;
+  }
+});
+</script>
+</body>
+</html>

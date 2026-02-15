@@ -1,0 +1,8 @@
+{
+  "name": "WaveshareEPD",
+  "version": "1.0.0",
+  "description": "Custom GxEPD2 panel driver for Waveshare ESP32-S3-ePaper-1.54 V2",
+  "dependencies": {
+    "zinggjm/GxEPD2": "^1.5.0"
+  }
+}
