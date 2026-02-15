@@ -28,6 +28,7 @@ String getAccessToken();
 bool   hasValidToken();
 bool   hasStoredRefreshToken();
 bool   isTokenExpiringSoon();
+long   getTokenExpirySeconds();   // seconds until token expires (negative = expired)
 
 // --- NVS persistence ---
 void loadAuthFromNVS();

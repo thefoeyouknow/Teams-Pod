@@ -64,7 +64,7 @@ class WS_EPD154V2 : public GxEPD2_EPD
     void _PowerOn();
     void _PowerOff();
     void _InitDisplay();
-    void _LoadLUT();
+    void _LoadLUT(const uint8_t* lut);
     void _Update_Full();
     void _Update_Part();
 };

@@ -5,11 +5,13 @@
 
 // BLE Service and Characteristic UUIDs
 #define BLE_SERVICE_UUID        0x00FF
-#define BLE_CHAR_SSID           "0001FF01-0000-1000-8000-00805F9B34FB"
-#define BLE_CHAR_PASSWORD       "0001FF02-0000-1000-8000-00805F9B34FB"
-#define BLE_CHAR_CLIENT_ID      "0001FF03-0000-1000-8000-00805F9B34FB"
-#define BLE_CHAR_TENANT_ID      "0001FF04-0000-1000-8000-00805F9B34FB"
-#define BLE_CHAR_SAVE           "0001FF05-0000-1000-8000-00805F9B34FB"
+#define BLE_CHAR_SSID           "0001ff01-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_PASSWORD       "0001ff02-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_CLIENT_ID      "0001ff03-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_TENANT_ID      "0001ff04-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_SAVE           "0001ff05-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_LIGHT_TYPE     "0001ff06-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_LIGHT_IP       "0001ff07-0000-1000-8000-00805f9b34fb"
 
 // NVS Storage Keys
 #define NVS_NAMESPACE           "puck_creds"
@@ -32,5 +34,7 @@ extern String g_ssid;
 extern String g_password;
 extern String g_client_id;
 extern String g_tenant_id;
+extern String g_light_type;
+extern String g_light_ip;
 
 #endif

@@ -1,12 +1,12 @@
-# Teams Puck - Firmware Project
+# Teams Pod - Firmware Project
 
-**Version:** 0.50 (MVP - Puck Only)  
+**Version:** 0.50 (MVP - Pod Only)  
 **Target Hardware:** Waveshare ESP32-S3-ePaper-1.54 V2  
 **Date:** Feb 14, 2026
 
 ## Project Overview
 
-Teams Puck is a portable Microsoft Teams status indicator built on the ESP32-S3. This MVP focuses exclusively on the puck firmware, with dock functionality (FM Radio, Amp, Speakers) deferred to future versions.
+Teams Pod is a portable Microsoft Teams status indicator built on the ESP32-S3. This MVP focuses exclusively on the pod firmware, with dock functionality (FM Radio, Amp, Speakers) deferred to future versions.
 
 ## Quick Start
 
@@ -38,7 +38,7 @@ pio device monitor -e waveshare_epaper_s3
 ## Project Structure
 
 ```
-Teams Puck/
+Teams Pod/
 ├── platformio.ini             # Build configuration
 ├── PROJECT_SEED_v0.50.md      # Design specification
 ├── src/
@@ -58,7 +58,7 @@ The `main.cpp` sketch validates:
 ### Serial Output Example
 
 ```
-=== Teams Puck Hardware Validator ===
+=== Teams Pod Hardware Validator ===
 Version: 0.50 (MVP - Puck Only)
 Target: Waveshare ESP32-S3-ePaper-1.54 V2
 

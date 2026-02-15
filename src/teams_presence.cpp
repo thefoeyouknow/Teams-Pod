@@ -37,9 +37,12 @@ bool getPresence(const String& accessToken, PresenceState& state) {
         return false;
     }
 
-    DynamicJsonDocument doc(512);
-    if (deserializeJson(doc, payload)) {
-        Serial.println("[Presence] JSON error");
+    DynamicJsonDocument doc(2048);
+    DeserializationError jsonErr = deserializeJson(doc, payload);
+    if (jsonErr) {
+        Serial.printf("[Presence] JSON error: %s (payload %d bytes)\n",
+                      jsonErr.c_str(), payload.length());
+        Serial.printf("[Presence] Payload: %.200s\n", payload.c_str());
         return false;
     }
 

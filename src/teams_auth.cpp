@@ -17,9 +17,11 @@ static Preferences auth_prefs;
 static const char* AUTH_NS      = "puck_auth";
 static const char* KEY_REFRESH  = "refresh_tok";
 
-// Scope: Presence.Read to poll status, offline_access to get refresh tokens
+// Scope: Presence.Read + User.Read (baseline) + offline_access for refresh tokens
 static const char* SCOPE_ENC =
-    "https%3A%2F%2Fgraph.microsoft.com%2FPresence.Read+offline_access";
+    "https%3A%2F%2Fgraph.microsoft.com%2FPresence.Read"
+    "+https%3A%2F%2Fgraph.microsoft.com%2FUser.Read"
+    "+offline_access";
 
 // ---- endpoint helpers -----------------------------------------------------
 static String deviceCodeEndpoint(const String& tid) {
@@ -58,8 +60,15 @@ bool startDeviceCodeFlow(const String& clientId, const String& tenantId,
     Serial.printf("[Auth] HTTP %d\n", code);
 
     if (code != 200) {
-        Serial.println(http.getString());
+        String errPayload = http.getString();
+        Serial.println(errPayload);
         http.end();
+
+        // Parse Azure error for a user-friendly message
+        DynamicJsonDocument errDoc(1024);
+        if (!deserializeJson(errDoc, errPayload) && errDoc.containsKey("error")) {
+            response.user_code = errDoc["error"].as<String>();  // reuse field for error detail
+        }
         return false;
     }
 
@@ -115,8 +124,13 @@ int pollForToken(const String& clientId, const String& tenantId,
     http.end();
 
     if (httpCode == 200) {
-        DynamicJsonDocument doc(4096);
-        if (deserializeJson(doc, payload)) return -1;
+        DynamicJsonDocument doc(16384);  // MS token JWTs can exceed 4KB
+        DeserializationError jsonErr = deserializeJson(doc, payload);
+        if (jsonErr) {
+            Serial.printf("[Auth] Token JSON parse FAILED: %s (payload %d bytes)\n",
+                          jsonErr.c_str(), payload.length());
+            return -1;
+        }
 
         s_access_token  = doc["access_token"].as<String>();
         s_refresh_token = doc["refresh_token"].as<String>();
@@ -128,17 +142,27 @@ int pollForToken(const String& clientId, const String& tenantId,
     }
 
     if (httpCode == 400) {
-        DynamicJsonDocument doc(512);
-        if (!deserializeJson(doc, payload)) {
+        DynamicJsonDocument doc(2048);
+        DeserializationError jsonErr = deserializeJson(doc, payload);
+        if (!jsonErr) {
             String err = doc["error"].as<String>();
+            Serial.printf("[Auth] Poll response: %s\n", err.c_str());
             if (err == "authorization_pending" || err == "slow_down")
                 return 0;   // keep waiting
-            Serial.printf("[Auth] Error: %s\n", err.c_str());
+            String errDesc = doc["error_description"].as<String>();
+            Serial.printf("[Auth] Fatal: %s\n", err.c_str());
+            Serial.printf("[Auth] Detail: %.300s\n", errDesc.c_str());
+            return -1;  // genuinely rejected
         }
+        // JSON parse failed on 400 — log it and treat as transient
+        Serial.printf("[Auth] 400 JSON parse failed: %s\n", jsonErr.c_str());
+        Serial.printf("[Auth] Payload (%d bytes): %.200s\n", payload.length(), payload.c_str());
+        return 0;
     }
 
-    Serial.printf("[Auth] Unexpected HTTP %d\n", httpCode);
-    return -1;  // fatal
+    // Transient HTTP errors (5xx, network issues) — don't give up
+    Serial.printf("[Auth] Unexpected HTTP %d — treating as transient\n", httpCode);
+    return -1;
 }
 
 // ============================================================================
@@ -174,7 +198,7 @@ bool refreshAccessToken(const String& clientId, const String& tenantId) {
         return false;
     }
 
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(16384);  // MS token JWTs can exceed 4KB
     if (deserializeJson(doc, payload)) return false;
 
     s_access_token = doc["access_token"].as<String>();
@@ -196,7 +220,15 @@ String getAccessToken()       { return s_access_token; }
 bool   hasValidToken()        { return !s_access_token.isEmpty() && millis() < s_token_expiry; }
 bool   hasStoredRefreshToken() { return !s_refresh_token.isEmpty(); }
 bool   isTokenExpiringSoon()  {
-    return s_token_expiry > 0 && (s_token_expiry - millis()) < 300000UL;   // <5 min
+    if (s_token_expiry == 0) return false;
+    unsigned long now = millis();
+    // Already expired, or within 5 minutes of expiry
+    return (now >= s_token_expiry) || (s_token_expiry - now < 300000UL);
+}
+long   getTokenExpirySeconds() {
+    if (s_token_expiry == 0) return 0;
+    long diff = (long)(s_token_expiry - millis()) / 1000L;
+    return diff;
 }
 
 // ============================================================================
@@ -204,9 +236,17 @@ bool   isTokenExpiringSoon()  {
 // ============================================================================
 
 void loadAuthFromNVS() {
-    auth_prefs.begin(AUTH_NS, true);
-    s_refresh_token = auth_prefs.getString(KEY_REFRESH, "");
-    auth_prefs.end();
+    // Open read-write on first call so the namespace is created if missing
+    if (!auth_prefs.begin(AUTH_NS, true)) {
+        // Namespace doesn't exist yet (first boot) — create it
+        auth_prefs.begin(AUTH_NS, false);
+        auth_prefs.end();
+        Serial.println("[Auth] NVS auth namespace created (first boot)");
+        s_refresh_token = "";
+    } else {
+        s_refresh_token = auth_prefs.getString(KEY_REFRESH, "");
+        auth_prefs.end();
+    }
     Serial.printf("[Auth] NVS refresh token: %s\n",
                   s_refresh_token.isEmpty() ? "(none)" : "(present)");
 }

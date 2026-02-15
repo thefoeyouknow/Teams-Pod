@@ -293,6 +293,11 @@ void WS_EPD154V2::refresh(bool partial_update_mode)
   if (partial_update_mode) refresh(0, 0, WIDTH, HEIGHT);
   else
   {
+    if (_using_partial_mode)
+    {
+      _LoadLUT(WF_Full_1IN54);  // switch back to full waveform
+      _using_partial_mode = false;
+    }
     _Update_Full();
     _initial_refresh = false;
   }
@@ -301,6 +306,11 @@ void WS_EPD154V2::refresh(bool partial_update_mode)
 void WS_EPD154V2::refresh(int16_t x, int16_t y, int16_t w, int16_t h)
 {
   if (_initial_refresh) return refresh(false);
+  if (!_using_partial_mode)
+  {
+    _LoadLUT(WF_Partial_1IN54);  // switch to partial waveform
+    _using_partial_mode = true;
+  }
   int16_t w1 = x < 0 ? w + x : w;
   int16_t h1 = y < 0 ? h + y : h;
   int16_t x1 = x < 0 ? 0 : x;
@@ -393,33 +403,33 @@ void WS_EPD154V2::_PowerOff()
 // Private: Display init — WAVESHARE-CORRECT SEQUENCE
 // ============================================================================
 
-void WS_EPD154V2::_LoadLUT()
+void WS_EPD154V2::_LoadLUT(const uint8_t* lut)
 {
   // Write 153 bytes of waveform LUT
   _writeCommand(0x32);
   for (int i = 0; i < 153; i++)
   {
-    _writeData(pgm_read_byte(&WF_Full_1IN54[i]));
+    _writeData(pgm_read_byte(&lut[i]));
   }
   _waitWhileBusy("_LoadLUT", 100);
 
   // Gate driving voltage
   _writeCommand(0x3F);
-  _writeData(pgm_read_byte(&WF_Full_1IN54[153])); // 0x22
+  _writeData(pgm_read_byte(&lut[153]));
 
   // Source driving voltage
   _writeCommand(0x03);
-  _writeData(pgm_read_byte(&WF_Full_1IN54[154])); // 0x17
+  _writeData(pgm_read_byte(&lut[154]));
 
   // Write VCOM register
   _writeCommand(0x04);
-  _writeData(pgm_read_byte(&WF_Full_1IN54[155])); // 0x41
-  _writeData(pgm_read_byte(&WF_Full_1IN54[156])); // 0x00
-  _writeData(pgm_read_byte(&WF_Full_1IN54[157])); // 0x32
+  _writeData(pgm_read_byte(&lut[155]));
+  _writeData(pgm_read_byte(&lut[156]));
+  _writeData(pgm_read_byte(&lut[157]));
 
   // VCOM voltage
   _writeCommand(0x2C);
-  _writeData(pgm_read_byte(&WF_Full_1IN54[158])); // 0x20
+  _writeData(pgm_read_byte(&lut[158]));
 }
 
 void WS_EPD154V2::_InitDisplay()
@@ -463,8 +473,8 @@ void WS_EPD154V2::_InitDisplay()
   _setPartialRamArea(0, 0, WIDTH, HEIGHT);
   _waitWhileBusy("_tempLUT", 200);
 
-  // Load custom waveform LUT + driving voltages — THE KEY FIX
-  _LoadLUT();
+  // Load custom full-refresh waveform LUT + driving voltages
+  _LoadLUT(WF_Full_1IN54);
 
   _init_display_done = true;
 }

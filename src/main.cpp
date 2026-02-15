@@ -1,5 +1,5 @@
 // ============================================================================
-// Teams Puck — main firmware
+// Teams Pod — main firmware
 //
 // State machine:
 //   BOOT → (no creds) → SETUP_BLE        — wait for BLE provisioning
@@ -16,11 +16,17 @@
 #include <GxEPD2_BW.h>
 #include <WS_EPD154V2.h>
 #include <WiFi.h>
+#include <esp_system.h>
 
 #include "ble_setup.h"
 #include "display_ui.h"
 #include "teams_auth.h"
 #include "teams_presence.h"
+#include "battery.h"
+#include "settings.h"
+#include "sd_storage.h"
+#include "audio.h"
+#include "light_control.h"
 
 // ============================================================================
 // Hardware pins  (Waveshare ESP32-S3-ePaper-1.54 V2)
@@ -32,6 +38,8 @@
 #define EPD_RST_PIN   9
 #define EPD_BUSY_PIN  8
 #define EPD_PWR_PIN   6    // ACTIVE LOW — LOW = on
+
+#define VBAT_PWR_PIN  17   // Battery power latch — HIGH = stay on
 
 #define BOOT_BUTTON   0
 #define PWR_BUTTON    18
@@ -62,8 +70,13 @@ static String              g_lastAvailability   = "";
 static unsigned long       g_lastPollTime       = 0;
 static unsigned long       g_lastPresenceCheck  = 0;
 static unsigned long       g_authStartTime      = 0;
+static int                 g_pollFailures       = 0;
+static PodSettings         g_settings;
+static LightConfig         g_lightCfg;
 
-static const unsigned long PRESENCE_INTERVAL    = 30000;  // 30 s
+static const unsigned long PRESENCE_INTERVAL    = 30000;  // default 30 s, overridden by settings
+static const int           MAX_POLL_FAILURES    = 5;      // allow 5 transient errors
+static int                 g_partialCount       = 0;      // track partial refreshes for periodic full
 
 // ============================================================================
 // Forward declarations
@@ -71,28 +84,81 @@ static const unsigned long PRESENCE_INTERVAL    = 30000;  // 30 s
 void initializeHardware();
 bool connectWiFi(unsigned long timeoutMs = 15000);
 void updateAndDisplayPresence();
+void handleMenu();
+void waitForAnyButton();
 
 // ============================================================================
 // setup()
 // ============================================================================
 void setup() {
+    // Latch battery power ON immediately (must be first)
+    pinMode(VBAT_PWR_PIN, OUTPUT);
+    digitalWrite(VBAT_PWR_PIN, HIGH);
+
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n=== Teams Puck v0.51 ===\n");
+    Serial.printf("\n=== Teams Pod v%s ===\n\n", FW_VERSION);
 
-    // --- Factory reset: BOOT held on power-up → wipe NVS and reboot ---
-    pinMode(BOOT_BUTTON, INPUT_PULLUP);
-    if (digitalRead(BOOT_BUTTON) == LOW) {
-        Serial.println("[Main] BOOT held — factory reset");
-        clearStoredCredentials();
-        clearAuthNVS();
-        delay(1000);
-        ESP.restart();
+    // Log reset reason for diagnostics
+    esp_reset_reason_t reason = esp_reset_reason();
+    const char* reasonStr = "UNKNOWN";
+    switch (reason) {
+        case ESP_RST_POWERON:  reasonStr = "POWER_ON";   break;
+        case ESP_RST_SW:       reasonStr = "SOFTWARE";    break;
+        case ESP_RST_PANIC:    reasonStr = "PANIC/CRASH"; break;
+        case ESP_RST_INT_WDT:  reasonStr = "INT_WDT";     break;
+        case ESP_RST_TASK_WDT: reasonStr = "TASK_WDT";    break;
+        case ESP_RST_WDT:      reasonStr = "OTHER_WDT";   break;
+        case ESP_RST_DEEPSLEEP:reasonStr = "DEEP_SLEEP";  break;
+        case ESP_RST_BROWNOUT: reasonStr = "BROWNOUT";    break;
+        default: break;
     }
+    Serial.printf("[Main] Reset reason: %s (%d)\n", reasonStr, (int)reason);
+
+    pinMode(BOOT_BUTTON, INPUT_PULLUP);
+    pinMode(PWR_BUTTON,  INPUT_PULLUP);
 
     initializeHardware();
-    drawBootScreen();
-    delay(2000);
+
+    // Mount SD card (before settings, so SD config is preferred)
+    if (sdInit()) {
+        Serial.printf("[Main] SD card: %s\n", sdCardInfo().c_str());
+    } else {
+        Serial.println("[Main] No SD card — using NVS for settings");
+    }
+
+    loadSettings(g_settings);
+    loadLightConfig(g_lightCfg);
+
+    // Audio init (ES8311 + I2S)
+    audioInit();
+
+    drawSplashScreen();
+
+    // --- Splash gate: wait for BOOT press (short = continue, hold 3s = reset)
+    Serial.println("[Main] Splash — press BOOT to continue, hold 3s for reset");
+    while (true) {
+        if (digitalRead(BOOT_BUTTON) == LOW) {
+            unsigned long holdStart = millis();
+            // Wait for release or 3-second hold
+            while (digitalRead(BOOT_BUTTON) == LOW) {
+                if (millis() - holdStart >= 3000) {
+                    Serial.println("[Main] BOOT held 3s — factory reset");
+                    drawErrorScreen("Factory Reset", "Clearing all data...");
+                    clearStoredCredentials();
+                    clearAuthNVS();
+                    delay(2000);
+                    ESP.restart();
+                }
+                delay(50);
+            }
+            // Short press — continue boot
+            Serial.println("[Main] BOOT pressed — continuing");
+            if (g_settings.audioAlerts) audioBeep();
+            break;
+        }
+        delay(50);
+    }
 
     // --- BLE always initialised (also opens NVS) ---
     initializeBLE();
@@ -106,6 +172,9 @@ void setup() {
         return;
     }
     loadCredentialsFromNVS();
+    // Sync BLE light globals → LightConfig (BLE saves to puck_creds namespace)
+    g_lightCfg.type = (LightType)g_light_type.toInt();
+    g_lightCfg.ip   = g_light_ip;
     Serial.printf("[Main] SSID: %s  Client: %s  Tenant: %s\n",
                   g_ssid.c_str(), g_client_id.c_str(), g_tenant_id.c_str());
 
@@ -123,7 +192,7 @@ void setup() {
         Serial.println("[Main] Attempting token refresh...");
         if (refreshAccessToken(g_client_id, g_tenant_id)) {
             g_state = STATE_RUNNING;
-            g_lastPresenceCheck = millis() - PRESENCE_INTERVAL;
+            g_lastPresenceCheck = 0;  // force immediate poll
             updateAndDisplayPresence();
             return;
         }
@@ -138,7 +207,11 @@ void setup() {
                          g_deviceCode.qr_url.c_str());
     } else {
         g_state = STATE_ERROR;
-        drawErrorScreen("Auth Error", "Device code request failed");
+        // Show Azure error code if available (e.g. "unauthorized_client")
+        const char* detail = g_deviceCode.user_code.isEmpty()
+            ? "Device code request failed"
+            : g_deviceCode.user_code.c_str();
+        drawErrorScreen("Auth Error", detail);
     }
 }
 
@@ -170,11 +243,18 @@ void loop() {
             if (r == 1) {
                 saveAuthToNVS();
                 g_state = STATE_RUNNING;
-                g_lastPresenceCheck = millis() - PRESENCE_INTERVAL;
+                g_lastPresenceCheck = 0;  // force immediate poll
                 updateAndDisplayPresence();
             } else if (r < 0) {
-                g_state = STATE_ERROR;
-                drawErrorScreen("Auth Error", "Token request denied");
+                g_pollFailures++;
+                Serial.printf("[Main] Poll failure %d/%d\n",
+                              g_pollFailures, MAX_POLL_FAILURES);
+                if (g_pollFailures >= MAX_POLL_FAILURES) {
+                    g_state = STATE_ERROR;
+                    drawErrorScreen("Auth Error", "Token request denied");
+                }
+            } else {
+                g_pollFailures = 0;  // reset on successful pending response
             }
         }
         break;
@@ -182,13 +262,23 @@ void loop() {
 
     // ---- Normal operation: poll presence --------------------------------
     case STATE_RUNNING: {
-        if (millis() - g_lastPresenceCheck >= PRESENCE_INTERVAL) {
+        // WiFi reconnect if connection dropped
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[Main] WiFi lost — reconnecting...");
+            if (!connectWiFi()) {
+                Serial.println("[Main] WiFi reconnect failed, will retry next loop");
+                delay(5000);
+                break;
+            }
+        }
+        if (millis() - g_lastPresenceCheck >=
+            (unsigned long)g_settings.presenceInterval * 1000UL) {
             g_lastPresenceCheck = millis();
             if (isTokenExpiringSoon())
                 refreshAccessToken(g_client_id, g_tenant_id);
             updateAndDisplayPresence();
         }
-        // manual refresh on short press
+        // BOOT = manual refresh
         if (digitalRead(BOOT_BUTTON) == LOW) {
             delay(200);
             if (digitalRead(BOOT_BUTTON) == LOW) {
@@ -196,6 +286,11 @@ void loop() {
                 updateAndDisplayPresence();
                 while (digitalRead(BOOT_BUTTON) == LOW) delay(50);
             }
+        }
+        // PWR = open menu
+        if (digitalRead(PWR_BUTTON) == LOW) {
+            delay(200);
+            handleMenu();
         }
         delay(100);
         break;
@@ -227,6 +322,9 @@ void initializeHardware() {
     pinMode(EPD_PWR_PIN, OUTPUT);
     digitalWrite(EPD_PWR_PIN, LOW);
     delay(200);
+
+    // Battery ADC
+    batteryInit();
 
     // GxEPD2 display
     display.init(115200, true, 20, false, SPI,
@@ -267,7 +365,9 @@ void updateAndDisplayPresence() {
         Serial.println("[Main] Token invalid — refreshing");
         if (!refreshAccessToken(g_client_id, g_tenant_id)) {
             g_state = STATE_ERROR;
-            drawErrorScreen("Token Expired", "Restart to re-auth");
+            drawErrorScreen("Token Expired", "Scan QR to re-auth");
+            if (g_settings.audioAlerts) audioChirp(3);
+            lightOff(g_lightCfg);
             return;
         }
     }
@@ -277,6 +377,7 @@ void updateAndDisplayPresence() {
         if (st.availability != g_lastAvailability) {
             drawStatusScreen(st.availability.c_str(),
                              st.activity.c_str());
+            lightSetPresence(g_lightCfg, st.availability.c_str());
             g_lastAvailability = st.availability;
         } else {
             Serial.printf("[Main] Unchanged: %s\n",
@@ -286,7 +387,159 @@ void updateAndDisplayPresence() {
     } else if (!hasValidToken()) {
         if (!refreshAccessToken(g_client_id, g_tenant_id)) {
             g_state = STATE_ERROR;
-            drawErrorScreen("Auth Lost", "Restart to re-auth");
+            drawErrorScreen("Auth Lost", "Scan QR to re-auth");
+            if (g_settings.audioAlerts) audioChirp(3);
+            lightOff(g_lightCfg);
         }
+    }
+}
+
+// ============================================================================
+// Wait for any button press (used by info sub-screens)
+// ============================================================================
+void waitForAnyButton() {
+    // Wait for all buttons to be released first
+    while (digitalRead(BOOT_BUTTON) == LOW || digitalRead(PWR_BUTTON) == LOW)
+        delay(50);
+    // Wait for a press
+    while (digitalRead(BOOT_BUTTON) == HIGH && digitalRead(PWR_BUTTON) == HIGH)
+        delay(50);
+    delay(200);  // debounce
+    // Wait for release
+    while (digitalRead(BOOT_BUTTON) == LOW || digitalRead(PWR_BUTTON) == LOW)
+        delay(50);
+}
+
+// ============================================================================
+// Menu handler — blocking loop while user navigates
+//   BOOT (⚙) = next item
+//   PWR       = select / toggle / enter
+// ============================================================================
+void handleMenu() {
+    Serial.println("[Menu] Entering menu");
+    // Wait for PWR release from the press that opened the menu
+    while (digitalRead(PWR_BUTTON) == LOW) delay(50);
+
+    int selected = 0;
+    drawMenuScreen(selected, g_settings, g_lightCfg);  // first draw: full refresh
+
+    while (true) {
+        // BOOT = next item
+        if (digitalRead(BOOT_BUTTON) == LOW) {
+            delay(200);
+            selected = (selected + 1) % MENU_COUNT;
+            drawMenuScreen(selected, g_settings, g_lightCfg, true);  // partial
+            while (digitalRead(BOOT_BUTTON) == LOW) delay(50);
+        }
+
+        // PWR = select
+        if (digitalRead(PWR_BUTTON) == LOW) {
+            delay(200);
+            while (digitalRead(PWR_BUTTON) == LOW) delay(50);
+
+            switch (selected) {
+            case MENU_DEVICE_INFO: {
+                float bv = batteryReadVoltage();
+                int bp = batteryPercent(bv);
+                String ip = WiFi.localIP().toString();
+                String sd = sdMounted() ? sdCardInfo() : String("No card");
+                drawDeviceInfoScreen(g_ssid.c_str(), ip.c_str(),
+                                     g_client_id.c_str(), g_tenant_id.c_str(),
+                                     bv, bp, sd.c_str(), true);
+                // BOOT = close, PWR = reboot
+                while (true) {
+                    if (digitalRead(BOOT_BUTTON) == LOW) {
+                        delay(200);
+                        while (digitalRead(BOOT_BUTTON) == LOW) delay(50);
+                        break;  // back to menu
+                    }
+                    if (digitalRead(PWR_BUTTON) == LOW) {
+                        delay(200);
+                        Serial.println("[Menu] Rebooting...");
+                        ESP.restart();
+                    }
+                    delay(50);
+                }
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+            }
+            case MENU_AUTH_STATUS: {
+                drawAuthInfoScreen(hasValidToken(), getTokenExpirySeconds(),
+                                   hasStoredRefreshToken(),
+                                   g_lastAvailability.c_str(), true);
+                // BOOT = close, PWR = factory reset
+                while (true) {
+                    if (digitalRead(BOOT_BUTTON) == LOW) {
+                        delay(200);
+                        while (digitalRead(BOOT_BUTTON) == LOW) delay(50);
+                        break;  // back to menu
+                    }
+                    if (digitalRead(PWR_BUTTON) == LOW) {
+                        delay(200);
+                        while (digitalRead(PWR_BUTTON) == LOW) delay(50);
+                        Serial.println("[Menu] Factory reset!");
+                        clearStoredCredentials();
+                        delay(500);
+                        ESP.restart();
+                    }
+                    delay(50);
+                }
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+            }
+            case MENU_LIGHT_TYPE: {
+                // Cycle: NONE → WLED → BULB → NONE
+                int t = (int)g_lightCfg.type + 1;
+                if (t > (int)LIGHT_BULB) t = (int)LIGHT_NONE;
+                g_lightCfg.type = (LightType)t;
+                saveLightConfig(g_lightCfg);
+                Serial.printf("[Menu] Light type → %d\n", t);
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+            }
+            case MENU_LIGHT_TEST:
+                Serial.println("[Menu] Testing light");
+                lightTest(g_lightCfg);
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+
+            case MENU_INVERT:
+                g_settings.invertDisplay = !g_settings.invertDisplay;
+                saveSettings(g_settings);
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+
+            case MENU_AUDIO:
+                g_settings.audioAlerts = !g_settings.audioAlerts;
+                saveSettings(g_settings);
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+
+            case MENU_BLE_SETUP: {
+                Serial.println("[Menu] Starting BLE setup");
+                drawSetupScreen();
+                startBLEAdvertising();
+                waitForAnyButton();
+                // Reload light config in case it was changed via BLE
+                loadLightConfig(g_lightCfg);
+                drawMenuScreen(selected, g_settings, g_lightCfg, true);
+                break;
+            }
+
+            case MENU_REFRESH:
+                Serial.println("[Menu] Refresh selected — exiting menu");
+                updateAndDisplayPresence();
+                return;
+
+            case MENU_EXIT:
+                Serial.println("[Menu] Exit");
+                if (g_lastAvailability.length() > 0) {
+                    drawStatusScreen(g_currentPresence.availability.c_str(),
+                                     g_currentPresence.activity.c_str());
+                }
+                return;
+            }
+        }
+        delay(50);
     }
 }

@@ -1,4 +1,5 @@
 #include "ble_setup.h"
+#include "light_control.h"
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 
@@ -7,6 +8,8 @@ String g_ssid = "";
 String g_password = "";
 String g_client_id = "";
 String g_tenant_id = "";
+String g_light_type = "0";
+String g_light_ip = "";
 
 // BLE objects
 static NimBLEServer* pServer = nullptr;
@@ -25,10 +28,6 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
         std::string value = pCharacteristic->getValue();
         
         Serial.printf("[BLE] Write to %s: \"%s\"\n", uuid.c_str(), value.c_str());
-    Serial.flush();
-        
-        Serial.printf("UUID check: '%s' == '%s' ? %d\n", uuid.c_str(), BLE_CHAR_SAVE, uuid == BLE_CHAR_SAVE);
-        Serial.flush();
         
         // Route to appropriate handler
         if (uuid == BLE_CHAR_SSID) {
@@ -50,11 +49,25 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
         else if (uuid == BLE_CHAR_SAVE) {
             Serial.println("  → SAVE triggered! Storing credentials to NVS...");
             saveCredentialsToNVS();
+            // Also sync light config to pod_light namespace
+            LightConfig lc;
+            lc.type = (LightType)g_light_type.toInt();
+            lc.ip   = g_light_ip;
+            lc.brightness = 128;
+            saveLightConfig(lc);
             Serial.println("  → Credentials saved. Rebooting in 2s...");
             delay(2000);
             Serial.println("  → Rebooting now!");
             Serial.flush();
             ESP.restart();
+        }
+        else if (uuid == BLE_CHAR_LIGHT_TYPE) {
+            g_light_type = String(value.c_str());
+            Serial.printf("  -> LIGHT_TYPE set to: %s\n", g_light_type.c_str());
+        }
+        else if (uuid == BLE_CHAR_LIGHT_IP) {
+            g_light_ip = String(value.c_str());
+            Serial.printf("  -> LIGHT_IP set to: %s\n", g_light_ip.c_str());
         }
     }
     
@@ -67,6 +80,12 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
         } 
         else if (uuid == BLE_CHAR_TENANT_ID) {
             pCharacteristic->setValue(std::string(g_tenant_id.c_str()));
+        }
+        else if (uuid == BLE_CHAR_LIGHT_TYPE) {
+            pCharacteristic->setValue(std::string(g_light_type.c_str()));
+        }
+        else if (uuid == BLE_CHAR_LIGHT_IP) {
+            pCharacteristic->setValue(std::string(g_light_ip.c_str()));
         }
     }
 };
@@ -87,11 +106,18 @@ class ServerCallback : public NimBLEServerCallbacks {
 
 /**
  * Initialize the NVS (Non-Volatile Storage)
+ * Note: we no longer hold the namespace open permanently.
+ * Each read/write function opens and closes its own session.
  */
 void initializeNVS() {
     Serial.println("[NVS] Initializing...");
-    nvs_prefs.begin(NVS_NAMESPACE, false);
-    Serial.println("[NVS] ✓ Ready");
+    // Quick open/close to verify NVS partition is accessible
+    if (nvs_prefs.begin(NVS_NAMESPACE, true)) {
+        nvs_prefs.end();
+        Serial.println("[NVS] ✓ Ready");
+    } else {
+        Serial.println("[NVS] ✗ Failed to open namespace");
+    }
 }
 
 /**
@@ -104,11 +130,14 @@ void loadCredentialsFromNVS() {
     g_password = nvs_prefs.getString(NVS_KEY_PASSWORD, "");
     g_client_id = nvs_prefs.getString(NVS_KEY_CLIENT_ID, "");
     g_tenant_id = nvs_prefs.getString(NVS_KEY_TENANT_ID, "");
+    g_light_type = nvs_prefs.getString("light_type", "0");
+    g_light_ip = nvs_prefs.getString("light_ip", "");
     nvs_prefs.end();
     
     Serial.printf("  SSID: %s\n", g_ssid.c_str());
     Serial.printf("  CLIENT_ID: %s\n", g_client_id.c_str());
     Serial.printf("  TENANT_ID: %s\n", g_tenant_id.c_str());
+    Serial.printf("  LIGHT: type=%s ip=%s\n", g_light_type.c_str(), g_light_ip.c_str());
 }
 
 /**
@@ -121,6 +150,8 @@ void saveCredentialsToNVS() {
     nvs_prefs.putString(NVS_KEY_PASSWORD, g_password);
     nvs_prefs.putString(NVS_KEY_CLIENT_ID, g_client_id);
     nvs_prefs.putString(NVS_KEY_TENANT_ID, g_tenant_id);
+    nvs_prefs.putString("light_type", g_light_type);
+    nvs_prefs.putString("light_ip", g_light_ip);
     nvs_prefs.end();
     Serial.println("[NVS] ✓ Credentials saved");
 }
@@ -145,7 +176,7 @@ void initializeBLE() {
     initializeNVS();
     
     // Create BLE device
-    NimBLEDevice::init("Teams-Puck");
+    NimBLEDevice::init("Teams-Pod");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
     
     // Create BLE server
@@ -189,32 +220,52 @@ void initializeBLE() {
     // SAVE (Write only - triggers reboot)
     NimBLECharacteristic* pSave = pService->createCharacteristic(
         BLE_CHAR_SAVE,
-        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+        NIMBLE_PROPERTY::WRITE
     );
     pSave->setCallbacks(pCharCallback);
+    
+    // LIGHT_TYPE (Write + Read): "0"=None, "1"=WLED, "2"=Smart Bulb
+    NimBLECharacteristic* pLightType = pService->createCharacteristic(
+        BLE_CHAR_LIGHT_TYPE,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::READ
+    );
+    pLightType->setCallbacks(pCharCallback);
+    
+    // LIGHT_IP (Write + Read): IP address of the light device
+    NimBLECharacteristic* pLightIP = pService->createCharacteristic(
+        BLE_CHAR_LIGHT_IP,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::READ
+    );
+    pLightIP->setCallbacks(pCharCallback);
     
     // Start service
     pService->start();
     
-    Serial.println("[BLE] ✓ Service created with 5 characteristics");
+    Serial.println("[BLE] ✓ Service created with 7 characteristics");
 }
 
 /**
  * Start BLE advertising
  */
 void startBLEAdvertising() {
-    if (!NimBLEDevice::getAdvertising()) {
-        Serial.println("[BLE] Creating advertising...");
-        NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
-        pAdv->addServiceUUID(NimBLEUUID((uint16_t)BLE_SERVICE_UUID));
-        pAdv->setScanResponse(true);
-        pAdv->setMinPreferred(0x06);
-        pAdv->setMaxPreferred(0x12);
+    NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+
+    // Stop first if already running (safe no-op if not)
+    if (pAdv->isAdvertising()) {
+        pAdv->stop();
+        delay(100);
     }
-    
-    Serial.println("[BLE] Starting advertising as 'Teams-Puck'...");
-    NimBLEDevice::startAdvertising();
-    Serial.println("[BLE] ✓ Advertising active");
+
+    // Configure on every call — idempotent, avoids stale state
+    pAdv->addServiceUUID(NimBLEUUID((uint16_t)BLE_SERVICE_UUID));
+    pAdv->setScanResponse(true);
+    pAdv->setMinPreferred(0x06);
+    pAdv->setMaxPreferred(0x12);
+
+    Serial.println("[BLE] Starting advertising as 'Teams-Pod'...");
+    bool ok = pAdv->start();
+    Serial.printf("[BLE] %s Advertising %s\n", ok ? "✓" : "✗",
+                  ok ? "active" : "FAILED");
 }
 
 /**

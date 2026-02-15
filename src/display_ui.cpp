@@ -1,15 +1,9 @@
 // ============================================================================
-// Display UI — all screen-rendering functions for Teams Puck
-//
-// QR Auth Screen design note:
-//   The QR code fills the entire 200×200 display.  A white strip at the
-//   bottom overlays the QR modules to show the human-readable user code.
-//   With ECC_HIGH (~30 % recovery), covering ~7 % of modules is safe.
-//   Keeping the QR version as small as possible maximises module size
-//   (easier phone scanning) and minimises the percentage of modules hidden.
+// Display UI — all screen-rendering functions for Teams Pod
 // ============================================================================
 
 #include "display_ui.h"
+#include "battery.h"
 #include <qrcode.h>
 
 // Adafruit-GFX FreeFont headers (bundled with GxEPD2's dependency)
@@ -53,29 +47,162 @@ static bool isInvertedStatus(const char* avail) {
 }
 
 // ============================================================================
-// Boot Screen
+// Battery Icon — lower-right corner
+//
+//   Draws a small battery outline with proportional fill and optional
+//   voltage text.  Works on both white and black backgrounds.
+//
+//   Layout (26×12 px):
+//   ┌──────────────────┐
+//   │ ████████         │╸  <- tip
+//   └──────────────────┘
+//
+// ============================================================================
+static void drawBatteryIcon(uint16_t fg, uint16_t bg) {
+    float voltage = batteryReadVoltage();
+    int   pct     = batteryPercent(voltage);
+    bool  usb     = batteryOnUSB(voltage);
+
+    // Icon geometry
+    const int bw = 22, bh = 11;          // body width/height
+    const int tw = 3,  th = 5;           // tip width/height
+    const int ix = 200 - bw - tw - 4;   // x origin (lower-right, 4px margin)
+    const int iy = 200 - bh - 4;         // y origin
+
+    // Body outline (2px border)
+    display.drawRect(ix, iy, bw, bh, fg);
+    display.drawRect(ix + 1, iy + 1, bw - 2, bh - 2, fg);
+
+    // Tip (positive terminal)
+    int tipX = ix + bw;
+    int tipY = iy + (bh - th) / 2;
+    display.fillRect(tipX, tipY, tw, th, fg);
+
+    // Fill level (inside body, 2px inset)
+    int innerW = bw - 4;
+    int innerH = bh - 4;
+    int fillW  = (innerW * pct) / 100;
+    if (fillW > 0) {
+        display.fillRect(ix + 2, iy + 2, fillW, innerH, fg);
+    }
+
+    // Voltage text to the left of icon
+    char buf[8];
+    if (usb) {
+        snprintf(buf, sizeof(buf), "USB");
+    } else {
+        snprintf(buf, sizeof(buf), "%.1fV", voltage);
+    }
+    display.setFont(NULL);
+    display.setTextSize(1);
+    display.setTextColor(fg);
+
+    int16_t x1, y1;
+    uint16_t tw2, th2;
+    display.getTextBounds(buf, 0, 0, &x1, &y1, &tw2, &th2);
+    display.setCursor(ix - tw2 - 3, iy + (bh - th2) / 2);
+    display.print(buf);
+
+    Serial.printf("[Batt] %.2fV  %d%%  %s\n", voltage, pct, usb ? "USB" : "BATT");
+}
+
+// ---------------------------------------------------------------------------
+// Gear icon — represents the BOOT button (has ⚙ symbol on PCB)
+// Draws a simple gear at (cx,cy) with given radius and color.
+// ---------------------------------------------------------------------------
+static void drawGearIcon(int cx, int cy, int r, uint16_t fg, uint16_t bg) {
+    // Gear body
+    display.fillCircle(cx, cy, r, fg);
+    // Centre hole
+    display.fillCircle(cx, cy, r / 3, bg);
+    // 6 teeth — small filled squares on the perimeter
+    const int toothW = max(2, r / 3);
+    for (int i = 0; i < 6; i++) {
+        float angle = i * PI / 3.0f;
+        int tx = cx + (int)(cos(angle) * (r + toothW / 2));
+        int ty = cy + (int)(sin(angle) * (r + toothW / 2));
+        display.fillRect(tx - toothW / 2, ty - toothW / 2,
+                         toothW, toothW, fg);
+    }
+}
+
+// ============================================================================
+// Splash Screen — shown at power-on, requires button press to proceed
 // ============================================================================
 
-void drawBootScreen() {
+void drawSplashScreen() {
+    float voltage = batteryReadVoltage();
+    int   pct     = batteryPercent(voltage);
+    bool  usb     = batteryOnUSB(voltage);
+
+    char battStr[24];
+    if (usb) {
+        snprintf(battStr, sizeof(battStr), "USB  %d%%", pct);
+    } else {
+        snprintf(battStr, sizeof(battStr), "%.2fV  %d%%", voltage, pct);
+    }
+
+    char verStr[16];
+    snprintf(verStr, sizeof(verStr), "v%s", FW_VERSION);
+
     display.setFullWindow();
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
+
+        // Double border
         display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
         display.drawRect(2, 2, 196, 196, GxEPD_BLACK);
 
+        // Title
         display.setFont(&FreeSansBold18pt7b);
         display.setTextColor(GxEPD_BLACK);
-        centerText("Teams", 70);
-        centerText("Puck", 105);
+        centerText("Teams", 60);
+        centerText("Pod", 95);
 
+        // Version
         display.setFont(&FreeSans9pt7b);
-        centerText("v0.51 MVP", 135);
+        centerText(verStr, 120);
 
+        // Battery bar (centred, larger than corner icon)
+        const int barW = 40, barH = 16;
+        const int barX = 60, barY = 135;
+        const int tipW = 4, tipH = 8;
+        display.drawRect(barX, barY, barW, barH, GxEPD_BLACK);
+        display.drawRect(barX + 1, barY + 1, barW - 2, barH - 2, GxEPD_BLACK);
+        display.fillRect(barX + barW, barY + (barH - tipH) / 2,
+                         tipW, tipH, GxEPD_BLACK);
+        int fillW = ((barW - 4) * pct) / 100;
+        if (fillW > 0)
+            display.fillRect(barX + 2, barY + 2, fillW, barH - 4, GxEPD_BLACK);
+
+        // Battery text to right of bar
         display.setFont(NULL);
         display.setTextSize(1);
-        centerText("Initializing...", 170);
+        display.setTextColor(GxEPD_BLACK);
+        display.setCursor(barX + barW + tipW + 6, barY + 4);
+        display.print(battStr);
+
+        // "Press ⚙ to start" with drawn gear icon
+        display.setFont(NULL);
+        display.setTextSize(1);
+        const char* pressMsg = "Press     to start";
+        int16_t x1, y1;
+        uint16_t tw, th;
+        display.getTextBounds(pressMsg, 0, 0, &x1, &y1, &tw, &th);
+        int msgX = (200 - tw) / 2 - x1;
+        int msgY = 180;
+        display.setCursor(msgX, msgY);
+        display.print("Press ");
+        int gearX = display.getCursorX() + 5;
+        int gearY = msgY + 3;
+        drawGearIcon(gearX, gearY, 4, GxEPD_BLACK, GxEPD_WHITE);
+        display.setCursor(gearX + 8, msgY);
+        display.print(" to start");
+
     } while (display.nextPage());
+
+    Serial.printf("[UI] Splash: %s  batt=%s\n", verStr, battStr);
 }
 
 // ============================================================================
@@ -140,22 +267,19 @@ void drawSetupScreen() {
 }
 
 // ============================================================================
-// QR Auth Screen — full-display QR code with user-code text overlay
+// QR Auth Screen — QR code with user-code text above (no overlay)
 // ============================================================================
 
 void drawQRAuthScreen(const char* userCode, const char* qrUrl) {
     Serial.printf("[QR] URL (%d chars): %s\n", strlen(qrUrl), qrUrl);
 
-    // --- generate QR code ---
-    int qrVersion = selectQRVersion(strlen(qrUrl));
-    // allocate for up to version 10 (max ~408 bytes)
+    // --- generate QR code (ECC_MEDIUM = smaller version = bigger modules) ---
     uint8_t qrcodeData[qrcode_getBufferSize(10)];
     QRCode qrcode;
-
-    // retry with larger versions if the selected one can't fit
+    int qrVersion = 1;
     int rc = -1;
     while (rc != 0 && qrVersion <= 10) {
-        rc = qrcode_initText(&qrcode, qrcodeData, qrVersion, ECC_HIGH,
+        rc = qrcode_initText(&qrcode, qrcodeData, qrVersion, ECC_MEDIUM,
                              qrUrl);
         if (rc != 0) qrVersion++;
     }
@@ -167,22 +291,29 @@ void drawQRAuthScreen(const char* userCode, const char* qrUrl) {
     Serial.printf("[QR] Version %d, %dx%d modules\n",
                   qrVersion, qrcode.size, qrcode.size);
 
-    // --- scaling ---
+    // --- layout: 24px top for user code, rest for QR with quiet zone ---
+    const int topH = 24;                    // text area height
     int modules = qrcode.size;
-    int scale   = 200 / modules;          // integer px per module
-    if (scale < 1) scale = 1;
+    int availH  = 200 - topH;               // pixels available for QR
+    int scale   = availH / (modules + 2);   // +2 for 1-module quiet zone each side
+    if (scale < 2) scale = 2;
     int totalPx = modules * scale;
     int offsetX = (200 - totalPx) / 2;
-    int offsetY = (200 - totalPx) / 2;
+    int offsetY = topH + (availH - totalPx) / 2;
 
-    // text strip at bottom (overlays QR — within ECC_HIGH tolerance)
-    const int stripH = 22;
-    const int stripY = 200 - stripH;
+    Serial.printf("[QR] scale=%d totalPx=%d offset=(%d,%d)\n",
+                  scale, totalPx, offsetX, offsetY);
 
     display.setFullWindow();
     display.firstPage();
     do {
         display.fillScreen(GxEPD_WHITE);
+
+        // --- user code text at top ---
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        String label = String("Code: ") + userCode;
+        centerText(label.c_str(), 19);
 
         // --- QR modules ---
         for (int y = 0; y < modules; y++) {
@@ -194,22 +325,6 @@ void drawQRAuthScreen(const char* userCode, const char* qrUrl) {
                 }
             }
         }
-
-        // --- white backing strip + user code ---
-        display.fillRect(0, stripY, 200, stripH, GxEPD_WHITE);
-        display.drawLine(0, stripY, 200, stripY, GxEPD_BLACK);
-
-        display.setFont(&FreeSansBold9pt7b);
-        display.setTextColor(GxEPD_BLACK);
-
-        String label = String("Code: ") + userCode;
-        int16_t x1, y1;
-        uint16_t w, h;
-        display.getTextBounds(label.c_str(), 0, 0, &x1, &y1, &w, &h);
-        int textX = (200 - w) / 2 - x1;
-        int textY = stripY + (stripH + h) / 2 - y1 - h;
-        display.setCursor(textX, textY + h);
-        display.print(label);
 
     } while (display.nextPage());
 
@@ -227,10 +342,10 @@ void drawStatusScreen(const char* availability, const char* activity) {
     uint16_t bg = inverted ? GxEPD_BLACK : GxEPD_WHITE;
     uint16_t fg = inverted ? GxEPD_WHITE : GxEPD_BLACK;
 
-    // pick font that fits the word
-    const GFXfont* statusFont = &FreeSansBold24pt7b;
-    if (strlen(availability) > 7)  statusFont = &FreeSansBold18pt7b;
-    if (strlen(availability) > 12) statusFont = &FreeSansBold12pt7b;
+    // pick font that fits the word (one step smaller across the board)
+    const GFXfont* statusFont = &FreeSansBold18pt7b;
+    if (strlen(availability) > 7)  statusFont = &FreeSansBold12pt7b;
+    if (strlen(availability) > 12) statusFont = &FreeSansBold9pt7b;
 
     display.setFullWindow();
     display.firstPage();
@@ -301,6 +416,9 @@ void drawStatusScreen(const char* availability, const char* activity) {
             display.print(act);
         }
 
+        // Battery icon (lower-right)
+        drawBatteryIcon(fg, bg);
+
         // border on light screens
         if (!inverted)
             display.drawRect(0, 0, 200, 200, fg);
@@ -343,9 +461,225 @@ void drawErrorScreen(const char* title, const char* detail) {
         // restart hint
         display.setFont(NULL);
         display.setTextSize(1);
-        centerText("Hold BOOT 3s to restart", 180);
+        centerText("Hold BOOT 3s to restart", 168);
+
+        // Battery icon (lower-right)
+        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
 
     } while (display.nextPage());
 
     Serial.printf("[UI] Error: %s — %s\n", title, detail ? detail : "");
+}
+
+// ============================================================================
+// Menu Screen
+// ============================================================================
+
+void drawMenuScreen(int selected, const PodSettings& settings,
+                    const LightConfig& light, bool partial) {
+    const char* labels[MENU_COUNT];
+    static char lightLabel[24];
+    snprintf(lightLabel, sizeof(lightLabel), "Light: %s", lightTypeName(light.type));
+
+    labels[MENU_DEVICE_INFO] = "Device Info";
+    labels[MENU_AUTH_STATUS] = "Auth Status";
+    labels[MENU_LIGHT_TYPE]  = lightLabel;
+    labels[MENU_LIGHT_TEST]  = "Test Light";
+    labels[MENU_INVERT]      = settings.invertDisplay ? "Invert: ON"  : "Invert: OFF";
+    labels[MENU_AUDIO]       = settings.audioAlerts   ? "Audio: ON"   : "Audio: OFF";
+    labels[MENU_BLE_SETUP]   = "BLE Setup";
+    labels[MENU_REFRESH]     = "Refresh Now";
+    labels[MENU_EXIT]        = "< Exit";
+
+    if (partial)
+        display.setPartialWindow(0, 0, 200, 200);
+    else
+        display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("MENU", 25);
+
+        // Separator
+        display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
+
+        // Menu items
+        display.setFont(&FreeSans9pt7b);
+        for (int i = 0; i < MENU_COUNT; i++) {
+            int y = 50 + i * 17;
+            if (i == selected) {
+                // Highlight bar
+                display.fillRect(5, y - 12, 190, 16, GxEPD_BLACK);
+                display.setTextColor(GxEPD_WHITE);
+            } else {
+                display.setTextColor(GxEPD_BLACK);
+            }
+            display.setCursor(15, y);
+            display.print(labels[i]);
+        }
+
+        // Button hints at bottom
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+
+        // Gear icon for BOOT button
+        drawGearIcon(12, 190, 4, GxEPD_BLACK, GxEPD_WHITE);
+        display.setCursor(20, 187);
+        display.print("=Next");
+
+        display.setCursor(110, 187);
+        display.print("PWR=Select");
+
+        // Battery icon (lower-right)
+        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Menu drawn, selected=%d\n", selected);
+}
+
+// ============================================================================
+// Device Info Screen
+// ============================================================================
+
+void drawDeviceInfoScreen(const char* ssid, const char* ip,
+                          const char* clientId, const char* tenantId,
+                          float battV, int battPct,
+                          const char* sdInfo, bool partial)
+{
+    // Truncate long IDs
+    char clientShort[20], tenantShort[20];
+    snprintf(clientShort, sizeof(clientShort), "%.8s...", clientId);
+    snprintf(tenantShort, sizeof(tenantShort), "%.8s...", tenantId);
+
+    char battBuf[16];
+    snprintf(battBuf, sizeof(battBuf), "%.2fV  %d%%", battV, battPct);
+
+    char heapBuf[16];
+    snprintf(heapBuf, sizeof(heapBuf), "%dKB", ESP.getFreeHeap() / 1024);
+
+    if (partial)
+        display.setPartialWindow(0, 0, 200, 200);
+    else
+        display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("DEVICE INFO", 25);
+        display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
+
+        // Info rows
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+        int y = 48;
+        const int lineH = 16;
+
+        display.setCursor(10, y); display.printf("SSID: %s", ssid);
+        y += lineH;
+        display.setCursor(10, y); display.printf("IP:   %s", ip);
+        y += lineH;
+        display.setCursor(10, y); display.printf("Client: %s", clientShort);
+        y += lineH;
+        display.setCursor(10, y); display.printf("Tenant: %s", tenantShort);
+        y += lineH;
+        display.setCursor(10, y); display.printf("Heap:   %s free", heapBuf);
+        y += lineH;
+        display.setCursor(10, y); display.printf("Batt:   %s", battBuf);
+        y += lineH;
+        display.setCursor(10, y); display.printf("SD:     %s", sdInfo ? sdInfo : "No card");
+        y += lineH;
+
+        char verBuf[16];
+        snprintf(verBuf, sizeof(verBuf), "v%s", FW_VERSION);
+        display.setCursor(10, y); display.printf("FW:     %s", verBuf);
+
+        // Footer
+        display.drawLine(10, 172, 190, 172, GxEPD_BLACK);
+        display.setCursor(10, 180);
+        display.print("BOOT:Close  PWR:Reboot");
+
+    } while (display.nextPage());
+
+    Serial.println("[UI] Device info screen drawn");
+}
+
+// ============================================================================
+// Auth Info Screen
+// ============================================================================
+
+void drawAuthInfoScreen(bool tokenValid, long expirySeconds,
+                        bool hasRefresh, const char* lastStatus,
+                        bool partial)
+{
+    char expiryBuf[32];
+    if (!tokenValid) {
+        snprintf(expiryBuf, sizeof(expiryBuf), "Expired");
+    } else if (expirySeconds > 3600) {
+        snprintf(expiryBuf, sizeof(expiryBuf), "%ldh %ldm",
+                 expirySeconds / 3600, (expirySeconds % 3600) / 60);
+    } else if (expirySeconds > 60) {
+        snprintf(expiryBuf, sizeof(expiryBuf), "%ld min", expirySeconds / 60);
+    } else {
+        snprintf(expiryBuf, sizeof(expiryBuf), "%ld sec", expirySeconds);
+    }
+
+    if (partial)
+        display.setPartialWindow(0, 0, 200, 200);
+    else
+        display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("AUTH STATUS", 25);
+        display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
+
+        // Info rows
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+        int y = 55;
+        const int lineH = 22;
+
+        display.setCursor(10, y);
+        display.printf("Token:   %s", tokenValid ? "Valid" : "INVALID");
+        y += lineH;
+
+        display.setCursor(10, y);
+        display.printf("Expires: %s", expiryBuf);
+        y += lineH;
+
+        display.setCursor(10, y);
+        display.printf("Refresh: %s", hasRefresh ? "Present" : "None");
+        y += lineH;
+
+        display.setCursor(10, y);
+        display.printf("Status:  %s", lastStatus ? lastStatus : "Unknown");
+
+        // Footer
+        display.drawLine(10, 160, 190, 160, GxEPD_BLACK);
+        display.setCursor(10, 170);
+        display.print("BOOT: Close");
+        display.setCursor(10, 184);
+        display.print("PWR:  Factory Reset");
+
+    } while (display.nextPage());
+
+    Serial.println("[UI] Auth info screen drawn");
 }
