@@ -44,9 +44,11 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
             Serial.printf("  -> TENANT_ID set to: %s\n", g_tenant_id.c_str());
         } 
         else if (uuid == BLE_CHAR_SAVE) {
-            Serial.println("  → SAVE triggered! Storing credentials to NVS and rebooting in 2s...");
+            Serial.println("  → SAVE triggered! Storing credentials to NVS...");
             saveCredentialsToNVS();
+            Serial.println("  → Credentials saved. Rebooting in 2s...");
             delay(2000);
+            Serial.println("  → Rebooting now!");
             ESP.restart();
         }
     }
