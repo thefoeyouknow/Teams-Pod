@@ -21,7 +21,7 @@
 
 // URL to the Web Bluetooth setup page.
 // Host web/setup.html on GitHub Pages (or any HTTPS host) and set this:
-static const char* SETUP_URL = "https://mikes.github.io/teams-puck/setup.html";
+static const char* SETUP_URL = "https://thefoeyouknow.github.io/Teams-Pod/web/setup.html";
 
 // ---------------------------------------------------------------------------
 // helpers
