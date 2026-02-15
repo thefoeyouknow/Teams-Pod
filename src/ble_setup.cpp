@@ -25,6 +25,10 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
         std::string value = pCharacteristic->getValue();
         
         Serial.printf("[BLE] Write to %s: \"%s\"\n", uuid.c_str(), value.c_str());
+    Serial.flush();
+        
+        Serial.printf("UUID check: '%s' == '%s' ? %d\n", uuid.c_str(), BLE_CHAR_SAVE, uuid == BLE_CHAR_SAVE);
+        Serial.flush();
         
         // Route to appropriate handler
         if (uuid == BLE_CHAR_SSID) {
