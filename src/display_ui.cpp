@@ -1,5 +1,5 @@
 // ============================================================================
-// Display UI — all screen-rendering functions for Teams Pod
+// Display UI — all screen-rendering functions for Status Pod
 // ============================================================================
 
 #include "display_ui.h"
@@ -15,7 +15,7 @@
 
 // URL to the Web Bluetooth setup page.
 // Host web/setup.html on GitHub Pages (or any HTTPS host) and set this:
-static const char* SETUP_URL = "https://thefoeyouknow.github.io/Teams-Pod/web/setup.html";
+static const char* SETUP_URL = "https://thefoeyouknow.github.io/Status-Pod/web/setup.html";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -91,7 +91,7 @@ static void drawBatteryIcon(uint16_t fg, uint16_t bg) {
     if (usb) {
         snprintf(buf, sizeof(buf), "USB");
     } else {
-        snprintf(buf, sizeof(buf), "%.1fV", voltage);
+        snprintf(buf, sizeof(buf), "%d%%", pct);
     }
     display.setFont(NULL);
     display.setTextSize(1);
@@ -130,7 +130,7 @@ static void drawGearIcon(int cx, int cy, int r, uint16_t fg, uint16_t bg) {
 // Splash Screen — shown at power-on, requires button press to proceed
 // ============================================================================
 
-void drawSplashScreen() {
+void drawSplashScreen(const char* platformLabel) {
     float voltage = batteryReadVoltage();
     int   pct     = batteryPercent(voltage);
     bool  usb     = batteryOnUSB(voltage);
@@ -157,11 +157,20 @@ void drawSplashScreen() {
         // Title
         display.setFont(&FreeSansBold18pt7b);
         display.setTextColor(GxEPD_BLACK);
-        centerText("Teams", 60);
-        centerText("Pod", 95);
+        centerText("Status", 55);
+        centerText("Pod", 88);
+
+        // Platform label (e.g. "for Teams" or "for Zoom")
+        if (platformLabel && platformLabel[0]) {
+            char plat[24];
+            snprintf(plat, sizeof(plat), "for %s", platformLabel);
+            display.setFont(&FreeSans9pt7b);
+            centerText(plat, 110);
+        }
 
         // Version
-        display.setFont(&FreeSans9pt7b);
+        display.setFont(NULL);
+        display.setTextSize(1);
         centerText(verStr, 120);
 
         // Battery bar (centred, larger than corner icon)
@@ -472,24 +481,90 @@ void drawErrorScreen(const char* title, const char* detail) {
 }
 
 // ============================================================================
+// Shutdown Screen — displayed before power off
+// ============================================================================
+
+void drawShutdownScreen() {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Power icon — circle with line
+        const int cx = 100, cy = 65, cr = 25;
+        display.drawCircle(cx, cy, cr, GxEPD_BLACK);
+        display.drawCircle(cx, cy, cr - 1, GxEPD_BLACK);
+        display.fillRect(cx - 2, cy - cr - 5, 5, 20, GxEPD_WHITE);
+        display.fillRect(cx - 1, cy - cr - 3, 3, 18, GxEPD_BLACK);
+
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("Powered Off", 125);
+
+        display.setFont(&FreeSans9pt7b);
+        centerText("Press PWR to start", 155);
+
+    } while (display.nextPage());
+
+    Serial.println("[UI] Shutdown screen drawn");
+}
+
+// ============================================================================
+// Low Battery Warning Screen
+// ============================================================================
+
+void drawLowBatteryScreen(int percent, bool critical) {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Warning triangle
+        display.fillTriangle(100, 20, 70, 70, 130, 70, GxEPD_BLACK);
+        display.fillTriangle(100, 30, 78, 65, 122, 65, GxEPD_WHITE);
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        display.setCursor(93, 62);
+        display.print("!");
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        if (critical) {
+            centerText("SHUTDOWN", 105);
+            display.setFont(&FreeSans9pt7b);
+            centerText("Battery critical", 130);
+        } else {
+            centerText("LOW BATTERY", 105);
+        }
+
+        // Large percentage
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", percent);
+        display.setFont(&FreeSansBold18pt7b);
+        centerText(buf, critical ? 175 : 160);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Low battery: %d%% %s\n", percent,
+                  critical ? "CRITICAL" : "warning");
+}
+
+// ============================================================================
 // Menu Screen
 // ============================================================================
 
 void drawMenuScreen(int selected, const PodSettings& settings,
                     const LightConfig& light, bool partial) {
     const char* labels[MENU_COUNT];
-    static char lightLabel[24];
-    snprintf(lightLabel, sizeof(lightLabel), "Light: %s", lightTypeName(light.type));
 
     labels[MENU_DEVICE_INFO] = "Device Info";
     labels[MENU_AUTH_STATUS] = "Auth Status";
-    labels[MENU_LIGHT_TYPE]  = lightLabel;
-    labels[MENU_LIGHT_TEST]  = "Test Light";
-    labels[MENU_INVERT]      = settings.invertDisplay ? "Invert: ON"  : "Invert: OFF";
-    labels[MENU_AUDIO]       = settings.audioAlerts   ? "Audio: ON"   : "Audio: OFF";
-    labels[MENU_BLE_SETUP]   = "BLE Setup";
-    labels[MENU_REFRESH]     = "Refresh Now";
-    labels[MENU_EXIT]        = "< Exit";
+    labels[MENU_LIGHTS]     = "Lights >";
+    labels[MENU_SETTINGS]   = "Settings >";
+    labels[MENU_REFRESH]    = "Refresh Now";
+    labels[MENU_EXIT]       = "< Exit";
 
     if (partial)
         display.setPartialWindow(0, 0, 200, 200);
@@ -508,13 +583,12 @@ void drawMenuScreen(int selected, const PodSettings& settings,
         // Separator
         display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
 
-        // Menu items
+        // Menu items — 6 items, 22px spacing
         display.setFont(&FreeSans9pt7b);
         for (int i = 0; i < MENU_COUNT; i++) {
-            int y = 50 + i * 17;
+            int y = 55 + i * 22;
             if (i == selected) {
-                // Highlight bar
-                display.fillRect(5, y - 12, 190, 16, GxEPD_BLACK);
+                display.fillRect(5, y - 13, 190, 18, GxEPD_BLACK);
                 display.setTextColor(GxEPD_WHITE);
             } else {
                 display.setTextColor(GxEPD_BLACK);
@@ -528,7 +602,6 @@ void drawMenuScreen(int selected, const PodSettings& settings,
         display.setTextSize(1);
         display.setTextColor(GxEPD_BLACK);
 
-        // Gear icon for BOOT button
         drawGearIcon(12, 190, 4, GxEPD_BLACK, GxEPD_WHITE);
         display.setCursor(20, 187);
         display.print("=Next");
@@ -536,12 +609,78 @@ void drawMenuScreen(int selected, const PodSettings& settings,
         display.setCursor(110, 187);
         display.print("PWR=Select");
 
-        // Battery icon (lower-right)
         drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
 
     } while (display.nextPage());
 
     Serial.printf("[UI] Menu drawn, selected=%d\n", selected);
+}
+
+// ============================================================================
+// Settings Screen (submenu)
+// ============================================================================
+
+void drawSettingsScreen(int selected, const PodSettings& settings,
+                        const LightConfig& light, bool partial) {
+    const char* labels[SET_COUNT];
+    static char lightLabel[24];
+    snprintf(lightLabel, sizeof(lightLabel), "Light: %s", lightTypeName(light.type));
+
+    labels[SET_LIGHT_TYPE]  = lightLabel;
+    labels[SET_LIGHT_TEST]  = "Test Light";
+    labels[SET_INVERT]      = settings.invertDisplay ? "Invert: ON"  : "Invert: OFF";
+    labels[SET_AUDIO]       = settings.audioAlerts   ? "Audio: ON"   : "Audio: OFF";
+    labels[SET_BLE_SETUP]   = "BLE Setup";
+    labels[SET_BACK]        = "< Back";
+
+    if (partial)
+        display.setPartialWindow(0, 0, 200, 200);
+    else
+        display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("SETTINGS", 25);
+
+        // Separator
+        display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
+
+        // Settings items — 7 items, 20px spacing
+        display.setFont(&FreeSans9pt7b);
+        for (int i = 0; i < SET_COUNT; i++) {
+            int y = 50 + i * 20;
+            if (i == selected) {
+                display.fillRect(5, y - 13, 190, 17, GxEPD_BLACK);
+                display.setTextColor(GxEPD_WHITE);
+            } else {
+                display.setTextColor(GxEPD_BLACK);
+            }
+            display.setCursor(15, y);
+            display.print(labels[i]);
+        }
+
+        // Button hints
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+
+        drawGearIcon(12, 190, 4, GxEPD_BLACK, GxEPD_WHITE);
+        display.setCursor(20, 187);
+        display.print("=Next");
+
+        display.setCursor(110, 187);
+        display.print("PWR=Select");
+
+        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Settings drawn, selected=%d\n", selected);
 }
 
 // ============================================================================
@@ -682,4 +821,173 @@ void drawAuthInfoScreen(bool tokenValid, long expirySeconds,
     } while (display.nextPage());
 
     Serial.println("[UI] Auth info screen drawn");
+}
+
+// ============================================================================
+// Lights Screen — scrollable device list
+// ============================================================================
+
+void drawLightsScreen(int selected, const std::vector<LightDevice>& devs,
+                      int scrollOffset, bool partial) {
+    // Total items = 2 fixed (Discover, Provision All) + devices + Back
+    int totalItems = 2 + (int)devs.size() + 1;  // +1 for Back
+
+    const int maxVisible = 6;   // max items visible at once
+    const int itemH = 20;       // pixels per row
+    const int startY = 50;      // first item baseline y
+
+    if (partial)
+        display.setPartialWindow(0, 0, 200, 200);
+    else
+        display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("LIGHTS", 25);
+        display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
+
+        // Item list (scrolled window)
+        display.setFont(&FreeSans9pt7b);
+        int visible = (totalItems < maxVisible) ? totalItems : maxVisible;
+        for (int vi = 0; vi < visible; vi++) {
+            int idx = scrollOffset + vi;
+            if (idx >= totalItems) break;
+
+            int y = startY + vi * itemH;
+            bool isSel = (idx == selected);
+
+            if (isSel) {
+                display.fillRect(5, y - 13, 190, 17, GxEPD_BLACK);
+                display.setTextColor(GxEPD_WHITE);
+            } else {
+                display.setTextColor(GxEPD_BLACK);
+            }
+
+            display.setCursor(15, y);
+            if (idx == 0) {
+                display.print("Discover");
+            } else if (idx == 1) {
+                display.print("Provision All");
+            } else if (idx == totalItems - 1) {
+                display.print("< Back");
+            } else {
+                // Device entry
+                int devIdx = idx - 2;
+                if (devIdx >= 0 && devIdx < (int)devs.size()) {
+                    const LightDevice& d = devs[devIdx];
+                    String label = d.name;
+                    if (label.length() > 16) label = label.substring(0, 16);
+                    // Type prefix + status suffix
+                    const char* typeChar = "?";
+                    if (d.type == LIGHT_WLED) typeChar = "W";
+                    else if (d.type == LIGHT_WIZ) typeChar = "Z";
+                    else if (d.type == LIGHT_HUE) typeChar = "H";
+                    const char* stat = d.responding ? (d.provisioned ? " ok" : " !") : " x";
+                    display.printf("[%s] %s%s", typeChar, label.c_str(), stat);
+                }
+            }
+        }
+
+        // Scroll indicators
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+        if (scrollOffset > 0) {
+            display.setCursor(185, 40);
+            display.print("^");
+        }
+        if (scrollOffset + maxVisible < totalItems) {
+            display.setCursor(185, startY + visible * itemH - 10);
+            display.print("v");
+        }
+
+        // Item count
+        display.setCursor(10, 170);
+        display.printf("%d device(s)", devs.size());
+
+        // Button hints
+        drawGearIcon(12, 190, 4, GxEPD_BLACK, GxEPD_WHITE);
+        display.setCursor(20, 187);
+        display.print("=Next");
+        display.setCursor(110, 187);
+        display.print("PWR=Select");
+        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Lights screen drawn, sel=%d, scroll=%d, devs=%d\n",
+                  selected, scrollOffset, devs.size());
+}
+
+// ============================================================================
+// Light Action Screen — per-device actions
+// ============================================================================
+
+void drawLightActionScreen(const LightDevice& dev, int selected, bool partial) {
+    const char* labels[LACT_COUNT] = { "Test", "Provision", "< Back" };
+
+    if (partial)
+        display.setPartialWindow(0, 0, 200, 200);
+    else
+        display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Device name as title
+        display.setFont(&FreeSansBold9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        String title = dev.name;
+        if (title.length() > 18) title = title.substring(0, 18);
+        centerText(title.c_str(), 22);
+
+        // Device info
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setCursor(10, 35);
+        display.printf("IP: %s", dev.ip.c_str());
+        display.setCursor(10, 47);
+        display.printf("Type: %s  %s",
+                       lightTypeName(dev.type),
+                       dev.provisioned ? "[Provisioned]" : "[Not Provisioned]");
+        display.setCursor(10, 59);
+        display.printf("Status: %s", dev.responding ? "Online" : "Offline");
+
+        display.drawLine(10, 70, 190, 70, GxEPD_BLACK);
+
+        // Action items
+        display.setFont(&FreeSans9pt7b);
+        for (int i = 0; i < LACT_COUNT; i++) {
+            int y = 90 + i * 24;
+            if (i == selected) {
+                display.fillRect(5, y - 13, 190, 18, GxEPD_BLACK);
+                display.setTextColor(GxEPD_WHITE);
+            } else {
+                display.setTextColor(GxEPD_BLACK);
+            }
+            display.setCursor(15, y);
+            display.print(labels[i]);
+        }
+
+        // Button hints
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+        drawGearIcon(12, 190, 4, GxEPD_BLACK, GxEPD_WHITE);
+        display.setCursor(20, 187);
+        display.print("=Next");
+        display.setCursor(110, 187);
+        display.print("PWR=Select");
+        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Light action screen: %s, sel=%d\n",
+                  dev.name.c_str(), selected);
 }

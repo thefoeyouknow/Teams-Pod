@@ -7,6 +7,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include "sd_storage.h"
 
 // ---- internal state -------------------------------------------------------
 static String  s_access_token  = "";
@@ -232,38 +233,52 @@ long   getTokenExpirySeconds() {
 }
 
 // ============================================================================
-// NVS persistence (refresh token only — access token is ephemeral)
+// Token persistence — SD primary, NVS read-only fallback
 // ============================================================================
 
+static const char* SD_REFRESH_PATH = "/refresh_token.txt";
+
 void loadAuthFromNVS() {
-    // Open read-write on first call so the namespace is created if missing
-    if (!auth_prefs.begin(AUTH_NS, true)) {
-        // Namespace doesn't exist yet (first boot) — create it
-        auth_prefs.begin(AUTH_NS, false);
-        auth_prefs.end();
-        Serial.println("[Auth] NVS auth namespace created (first boot)");
-        s_refresh_token = "";
-    } else {
+    // Try SD card first
+    String tok = sdReadText(SD_REFRESH_PATH);
+    tok.trim();
+    if (tok.length() > 0) {
+        s_refresh_token = tok;
+        Serial.println("[Auth] Refresh token loaded from SD");
+        return;
+    }
+
+    // Fallback: read from NVS (legacy / no-SD boot)
+    if (auth_prefs.begin(AUTH_NS, true)) {
         s_refresh_token = auth_prefs.getString(KEY_REFRESH, "");
         auth_prefs.end();
+    } else {
+        s_refresh_token = "";
     }
-    Serial.printf("[Auth] NVS refresh token: %s\n",
+    Serial.printf("[Auth] Refresh token from NVS fallback: %s\n",
                   s_refresh_token.isEmpty() ? "(none)" : "(present)");
 }
 
 void saveAuthToNVS() {
-    auth_prefs.begin(AUTH_NS, false);
-    auth_prefs.putString(KEY_REFRESH, s_refresh_token);
-    auth_prefs.end();
-    Serial.println("[Auth] Refresh token saved to NVS");
+    // Write to SD only — no NVS writes during normal operation
+    if (sdWriteText(SD_REFRESH_PATH, s_refresh_token)) {
+        Serial.println("[Auth] Refresh token saved to SD");
+    } else {
+        Serial.println("[Auth] WARNING: SD write failed for refresh token");
+    }
 }
 
 void clearAuthNVS() {
+    // Clear SD token file
+    if (sdMounted()) {
+        sdWriteText(SD_REFRESH_PATH, "");
+    }
+    // Also clear legacy NVS
     auth_prefs.begin(AUTH_NS, false);
     auth_prefs.clear();
     auth_prefs.end();
     s_access_token  = "";
     s_refresh_token = "";
     s_token_expiry  = 0;
-    Serial.println("[Auth] Auth NVS cleared");
+    Serial.println("[Auth] Auth cleared (SD + NVS)");
 }

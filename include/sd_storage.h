@@ -32,8 +32,9 @@ String sdCardInfo();
 // ---- JSON config file (/sdcard/config.json) ----
 
 struct SdConfig {
-    bool   invertDisplay = false;
-    bool   audioAlerts   = false;
+    int    platform       = 0;          // 0=Teams, 1=Zoom
+    bool   invertDisplay  = false;
+    bool   audioAlerts    = false;
     int    presenceInterval = 30;       // seconds between presence polls
     int    fullRefreshEvery = 10;       // do full refresh every N partial updates
     String timezone       = "UTC";
@@ -45,6 +46,14 @@ bool sdLoadConfig(SdConfig& cfg);
 
 // Save config to SD.  Returns true on success.
 bool sdSaveConfig(const SdConfig& cfg);
+
+// ---- Plain text file helpers ----
+
+// Write a string to a file on SD.  Creates/overwrites.  Returns true on success.
+bool sdWriteText(const char* path, const String& content);
+
+// Read entire file as a String.  Returns empty string on failure.
+String sdReadText(const char* path);
 
 // ---- Asset helpers ----
 

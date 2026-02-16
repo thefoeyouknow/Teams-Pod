@@ -7,11 +7,21 @@
 
 #include <Arduino.h>
 
+// Platform — determines auth flow, presence API, and branding
+enum Platform {
+    PLATFORM_TEAMS = 0,
+    PLATFORM_ZOOM  = 1,
+    PLATFORM_COUNT = 2
+};
+
+const char* platformName(Platform p);
+
 struct PodSettings {
-    bool invertDisplay   = false;   // false = normal (white bg)
-    bool audioAlerts     = false;   // false = silent
-    int  presenceInterval = 30;     // seconds between presence polls
-    int  fullRefreshEvery = 10;     // full refresh every N partial updates
+    Platform platform     = PLATFORM_TEAMS;
+    bool invertDisplay    = false;   // false = normal (white bg)
+    bool audioAlerts      = false;   // false = silent
+    int  presenceInterval = 120;     // seconds between presence polls
+    int  fullRefreshEvery = 10;      // full refresh every N partial updates
 };
 
 // Load settings: tries SD card first, then NVS fallback.

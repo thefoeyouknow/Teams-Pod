@@ -20,14 +20,18 @@ enum LightType {
     LIGHT_NONE = 0,
     LIGHT_WLED = 1,
     LIGHT_BULB = 2,
-    LIGHT_TYPE_COUNT = 3
+    LIGHT_HUE  = 3,
+    LIGHT_WIZ  = 4,
+    LIGHT_TYPE_COUNT = 5
 };
 
 // Light configuration (persisted in NVS + SD)
 struct LightConfig {
     LightType type      = LIGHT_NONE;
     String    ip        = "";           // device IP, e.g. "192.168.1.100"
-    int       brightness = 128;         // 0–255
+    int       brightness = 128;         // 0-255
+    String    key       = "";           // API key (Hue bridge username)
+    String    aux       = "1";          // auxiliary param (Hue light ID)
 };
 
 // Get human-readable name for light type

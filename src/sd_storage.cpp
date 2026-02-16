@@ -108,14 +108,15 @@ bool sdLoadConfig(SdConfig& cfg) {
         return false;
     }
 
+    cfg.platform         = doc["platform"]         | cfg.platform;
     cfg.invertDisplay    = doc["invertDisplay"]    | cfg.invertDisplay;
     cfg.audioAlerts      = doc["audioAlerts"]      | cfg.audioAlerts;
     cfg.presenceInterval = doc["presenceInterval"] | cfg.presenceInterval;
     cfg.fullRefreshEvery = doc["fullRefreshEvery"] | cfg.fullRefreshEvery;
     cfg.timezone         = doc["timezone"]         | cfg.timezone.c_str();
 
-    Serial.printf("[SD] Config loaded: invert=%d audio=%d interval=%d fullEvery=%d tz=%s\n",
-                  cfg.invertDisplay, cfg.audioAlerts,
+    Serial.printf("[SD] Config loaded: platform=%d invert=%d audio=%d interval=%d fullEvery=%d tz=%s\n",
+                  cfg.platform, cfg.invertDisplay, cfg.audioAlerts,
                   cfg.presenceInterval, cfg.fullRefreshEvery,
                   cfg.timezone.c_str());
     return true;
@@ -125,6 +126,7 @@ bool sdSaveConfig(const SdConfig& cfg) {
     if (!g_sd_mounted) return false;
 
     StaticJsonDocument<512> doc;
+    doc["platform"]         = cfg.platform;
     doc["invertDisplay"]    = cfg.invertDisplay;
     doc["audioAlerts"]      = cfg.audioAlerts;
     doc["presenceInterval"] = cfg.presenceInterval;
@@ -142,6 +144,46 @@ bool sdSaveConfig(const SdConfig& cfg) {
 
     Serial.printf("[SD] Config saved (%d bytes)\n", written);
     return written > 0;
+}
+
+// ============================================================================
+// Plain text file helpers
+// ============================================================================
+
+bool sdWriteText(const char* path, const String& content) {
+    if (!g_sd_mounted) {
+        Serial.printf("[SD] Write failed (not mounted): %s\n", path);
+        return false;
+    }
+
+    File f = SD_MMC.open(path, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[SD] Failed to open for writing: %s\n", path);
+        return false;
+    }
+
+    size_t written = f.print(content);
+    f.close();
+
+    if (written != content.length()) {
+        Serial.printf("[SD] Short write: %d/%d bytes to %s\n",
+                      written, content.length(), path);
+        return false;
+    }
+
+    Serial.printf("[SD] Wrote %d bytes to %s\n", written, path);
+    return true;
+}
+
+String sdReadText(const char* path) {
+    if (!g_sd_mounted) return "";
+
+    File f = SD_MMC.open(path, FILE_READ);
+    if (!f) return "";
+
+    String content = f.readString();
+    f.close();
+    return content;
 }
 
 // ============================================================================

@@ -2,7 +2,7 @@
 // Audio — ES8311 codec + I2S tone generation
 //
 // Hardware (Waveshare ESP32-S3-ePaper-1.54 V2):
-//   ES8311 codec via I2C (SCL=47, SDA=48)
+//   ES8311 codec via I2C (SDA=47, SCL=48)
 //   I2S output: MCLK=14, BCLK=15, WS=38, DOUT=45, DIN=16
 //   PA enable: GPIO 46 (active HIGH)
 //   Audio power: GPIO 42 (active LOW)
@@ -20,6 +20,9 @@ void audioInit();
 void audioEnable();
 void audioDisable();
 
+// Graceful shutdown — uninstall I2S, power off codec.
+void audioShutdown();
+
 // --- Tone primitives ---
 
 // Play a single sine tone at `freqHz` for `durationMs` milliseconds.
@@ -27,7 +30,10 @@ void audioTone(int freqHz, int durationMs);
 
 // --- Canned sound effects ---
 
-// Short click/beep for button presses (~50ms, 2kHz)
+// Short click for button presses (~30ms, 4kHz)
+void audioClick();
+
+// Short beep (~100ms, 2kHz)
 void audioBeep();
 
 // Confirmation tone (two ascending beeps)
@@ -36,8 +42,8 @@ void audioConfirm();
 // Error/warning tone (low buzz)
 void audioError();
 
-// Urgent repeating chirp for re-auth required.
-// Plays `repeats` chirps with gaps.  Blocking.
-void audioChirp(int repeats = 3);
+// Attention tone — plays the startup test tone 3 times.
+// Used when token renewal requires user action.  Blocking.
+void audioAttention(int repeats = 3);
 
 #endif
