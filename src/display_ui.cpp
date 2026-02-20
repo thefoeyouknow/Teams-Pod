@@ -69,29 +69,36 @@ static void drawBatteryIcon(uint16_t fg, uint16_t bg, bool large = false) {
     bool  usb     = batteryOnUSB(voltage);
 
     if (large) {
-        // --- Large battery icon for status screen ---
-        const int bw = 36, bh = 18;          // body
-        const int tipW = 5, tipH = 8;        // tip
-        const int ix = 200 - bw - tipW - 6;  // x (lower-right, 6px margin)
-        const int iy = 200 - bh - 6;         // y
+        // --- Large vertical battery icon for status screen ---
+        //   Tip on top, fill from bottom
+        //        ╺╸       <- tip
+        //   ┌──────────┐
+        //   │          │
+        //   │ ████████ │
+        //   └──────────┘
+        const int bw = 18, bh = 36;          // body (vertical)
+        const int tipW = 8, tipH = 5;        // tip (horizontal nub on top)
+        const int ix = 200 - bw - 6;         // x (lower-right, 6px margin)
+        const int iy = 200 - bh - tipH - 6;  // y (leave room for tip above)
 
-        // Body outline (2px border)
-        display.drawRect(ix, iy, bw, bh, fg);
-        display.drawRect(ix + 1, iy + 1, bw - 2, bh - 2, fg);
-
-        // Tip
-        int tipX = ix + bw;
-        int tipY = iy + (bh - tipH) / 2;
+        // Tip (centred on top)
+        int tipX = ix + (bw - tipW) / 2;
+        int tipY = iy;
         display.fillRect(tipX, tipY, tipW, tipH, fg);
 
-        // Fill level (inside body, 2px inset)
+        // Body outline (2px border, below tip)
+        int bodyY = iy + tipH;
+        display.drawRect(ix, bodyY, bw, bh, fg);
+        display.drawRect(ix + 1, bodyY + 1, bw - 2, bh - 2, fg);
+
+        // Fill level (inside body, 2px inset, fills from bottom)
         int innerW = bw - 4;
         int innerH = bh - 4;
-        int fillW  = (innerW * pct) / 100;
-        if (fillW > 0)
-            display.fillRect(ix + 2, iy + 2, fillW, innerH, fg);
+        int fillH  = (innerH * pct) / 100;
+        if (fillH > 0)
+            display.fillRect(ix + 2, bodyY + 2 + (innerH - fillH), innerW, fillH, fg);
 
-        // Percent text to the left of icon (size 2 = 12px tall)
+        // Percent text above icon (size 2 = 12px tall)
         char buf[8];
         if (usb) snprintf(buf, sizeof(buf), "USB");
         else     snprintf(buf, sizeof(buf), "%d%%", pct);
@@ -103,28 +110,33 @@ static void drawBatteryIcon(uint16_t fg, uint16_t bg, bool large = false) {
         int16_t x1, y1;
         uint16_t tw2, th2;
         display.getTextBounds(buf, 0, 0, &x1, &y1, &tw2, &th2);
-        display.setCursor(ix - tw2 - 4, iy + (bh - th2) / 2);
+        // Centre text horizontally over the icon, place above tip
+        display.setCursor(ix + (bw - (int)tw2) / 2 - x1, iy - th2 - 3);
         display.print(buf);
         display.setTextSize(1);  // reset after large battery text
     } else {
-        // --- Compact battery icon for menu screens ---
-        const int bw = 22, bh = 11;
-        const int tipW = 3, tipH = 5;
-        const int ix = 200 - bw - tipW - 4;
-        const int iy = 200 - bh - 4;
+        // --- Compact vertical battery icon for menu screens ---
+        const int bw = 11, bh = 22;
+        const int tipW = 5, tipH = 3;
+        const int ix = 200 - bw - 4;
+        const int iy = 200 - bh - tipH - 4;
 
-        display.drawRect(ix, iy, bw, bh, fg);
-        display.drawRect(ix + 1, iy + 1, bw - 2, bh - 2, fg);
-
-        int tipX = ix + bw;
-        int tipY = iy + (bh - tipH) / 2;
+        // Tip (centred on top)
+        int tipX = ix + (bw - tipW) / 2;
+        int tipY = iy;
         display.fillRect(tipX, tipY, tipW, tipH, fg);
 
+        // Body outline
+        int bodyY = iy + tipH;
+        display.drawRect(ix, bodyY, bw, bh, fg);
+        display.drawRect(ix + 1, bodyY + 1, bw - 2, bh - 2, fg);
+
+        // Fill level (from bottom)
         int innerW = bw - 4;
         int innerH = bh - 4;
-        int fillW  = (innerW * pct) / 100;
-        if (fillW > 0)
-            display.fillRect(ix + 2, iy + 2, fillW, innerH, fg);
+        int fillH  = (innerH * pct) / 100;
+        if (fillH > 0)
+            display.fillRect(ix + 2, bodyY + 2 + (innerH - fillH), innerW, fillH, fg);
 
         char buf[8];
         if (usb) snprintf(buf, sizeof(buf), "USB");
@@ -137,7 +149,8 @@ static void drawBatteryIcon(uint16_t fg, uint16_t bg, bool large = false) {
         int16_t x1, y1;
         uint16_t tw2, th2;
         display.getTextBounds(buf, 0, 0, &x1, &y1, &tw2, &th2);
-        display.setCursor(ix - tw2 - 3, iy + (bh - th2) / 2);
+        // Text above icon
+        display.setCursor(ix + (bw - (int)tw2) / 2 - x1, iy - th2 - 2);
         display.print(buf);
     }
 
@@ -169,6 +182,30 @@ static void drawGearIcon(int cx, int cy, int r, uint16_t fg, uint16_t bg) {
 // ============================================================================
 
 void drawSplashScreen(const char* platformLabel) {
+    // --- Try BMP splash from SD card first ---
+    const char* splashPath = nullptr;
+    if (platformLabel) {
+        if (strcmp(platformLabel, "Zoom") == 0)
+            splashPath = "/graphics/zoom_splash.bmp";
+        else
+            splashPath = "/graphics/teams_splash.bmp";
+    }
+    if (splashPath && sdMounted() && sdFileExists(splashPath)) {
+        static uint8_t bmpBuf[5000];
+        if (sdLoadBMP(splashPath, bmpBuf, sizeof(bmpBuf))) {
+            display.setFullWindow();
+            display.firstPage();
+            do {
+                display.fillScreen(GxEPD_WHITE);
+                display.drawBitmap(0, 0, bmpBuf, 200, 200, GxEPD_WHITE, GxEPD_BLACK);
+                drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE, true);
+            } while (display.nextPage());
+            Serial.printf("[UI] BMP Splash: %s\n", splashPath);
+            return;
+        }
+    }
+
+    // --- Fallback: programmatic splash ---
     float voltage = batteryReadVoltage();
     int   pct     = batteryPercent(voltage);
     bool  usb     = batteryOnUSB(voltage);
