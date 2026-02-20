@@ -35,9 +35,16 @@ struct SdConfig {
     int    platform       = 0;          // 0=Teams, 1=Zoom
     bool   invertDisplay  = false;
     bool   audioAlerts    = false;
-    int    presenceInterval = 30;       // seconds between presence polls
+    int    presenceInterval = 120;      // seconds between presence polls
     int    fullRefreshEvery = 10;       // do full refresh every N partial updates
     String timezone       = "UTC";
+    // Office hours deep-sleep schedule
+    bool    officeHoursEnabled = false;
+    int     officeStartHour    = 8;
+    int     officeStartMin     = 0;
+    int     officeEndHour      = 17;
+    int     officeEndMin       = 0;
+    uint8_t officeDays         = 0x1F;  // Mon-Fri bitmask (bit0=Mon..bit6=Sun)
 };
 
 // Load config from SD.  Returns true on success; fills `cfg` with values.
@@ -71,5 +78,9 @@ uint8_t* sdReadFile(const char* path, size_t& outLen);
 // Read a raw monochrome bitmap (200×200 / 8 = 5000 bytes) for e-paper.
 // Returns true and fills `buf` (must be ≥ 5000 bytes).
 bool sdLoadBitmap(const char* path, uint8_t* buf, size_t bufLen);
+
+// Load a 1-bit 200×200 BMP file, parse header, flip rows, normalise colours.
+// Output: bit 0 = black, bit 1 = white.  Buffer must be ≥ 5000 bytes.
+bool sdLoadBMP(const char* path, uint8_t* pixelBuf, size_t bufLen);
 
 #endif

@@ -88,10 +88,8 @@ bool startDeviceCodeFlow(const String& clientId, const String& tenantId,
     response.expires_in        = doc["expires_in"] | 900;
     response.interval          = doc["interval"]   | 5;
 
-    // Build QR URL — append ?otc= with dashes stripped
-    String codeClean = response.user_code;
-    codeClean.replace("-", "");
-    response.qr_url = response.verification_uri + "?otc=" + codeClean;
+    // QR URL — just the base verification URI (code shown as text below QR)
+    response.qr_url = response.verification_uri;
 
     response.valid = true;
 

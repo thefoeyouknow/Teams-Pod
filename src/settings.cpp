@@ -26,6 +26,13 @@ void loadSettings(PodSettings& s) {
             s.audioAlerts      = cfg.audioAlerts;
             s.presenceInterval = cfg.presenceInterval;
             s.fullRefreshEvery = cfg.fullRefreshEvery;
+            s.timezone            = cfg.timezone;
+            s.officeHoursEnabled  = cfg.officeHoursEnabled;
+            s.officeStartHour     = cfg.officeStartHour;
+            s.officeStartMin      = cfg.officeStartMin;
+            s.officeEndHour       = cfg.officeEndHour;
+            s.officeEndMin        = cfg.officeEndMin;
+            s.officeDays          = cfg.officeDays;
             Serial.println("[Settings] Loaded from SD card");
             return;
         }
@@ -39,6 +46,13 @@ void loadSettings(PodSettings& s) {
         s.audioAlerts      = prefs.getBool("audio",    false);
         s.presenceInterval = prefs.getInt("interval",  120);
         s.fullRefreshEvery = prefs.getInt("fullEvery", 10);
+        s.timezone            = prefs.getString("timezone", "");
+        s.officeHoursEnabled  = prefs.getBool("oh_enabled", false);
+        s.officeStartHour     = prefs.getInt("oh_start_h", 8);
+        s.officeStartMin      = prefs.getInt("oh_start_m", 0);
+        s.officeEndHour       = prefs.getInt("oh_end_h", 17);
+        s.officeEndMin        = prefs.getInt("oh_end_m", 0);
+        s.officeDays          = (uint8_t)prefs.getInt("oh_days", 0x1F);
         prefs.end();
         Serial.println("[Settings] Loaded from NVS");
     } else {
@@ -61,6 +75,13 @@ void saveSettings(const PodSettings& s) {
         cfg.audioAlerts      = s.audioAlerts;
         cfg.presenceInterval = s.presenceInterval;
         cfg.fullRefreshEvery = s.fullRefreshEvery;
+        cfg.timezone            = s.timezone;
+        cfg.officeHoursEnabled  = s.officeHoursEnabled;
+        cfg.officeStartHour     = s.officeStartHour;
+        cfg.officeStartMin      = s.officeStartMin;
+        cfg.officeEndHour       = s.officeEndHour;
+        cfg.officeEndMin        = s.officeEndMin;
+        cfg.officeDays          = s.officeDays;
         sdSaveConfig(cfg);
     } else {
         Serial.println("[Settings] WARNING: SD not mounted, settings not saved");

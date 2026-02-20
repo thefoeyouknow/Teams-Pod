@@ -13,7 +13,7 @@
 This phase focuses **only on the Puck firmware**. All code related to the "Smart Dock" (FM Radio, Amp, Speakers) is **DEFERRED**. Do not generate code for RDA5807M or TPA2016.
 
 ### Hardware
-Target the **Waveshare ESP32-S3-ePaper-1.54 V2**. This board uses OPI PSRAM (8MB) and 16MB Flash.
+Target the **Waveshare ESP32-S3-ePaper-1.54 V2**. This board uses the **ESP32-S3-PICO-1-N8R8** module with OPI PSRAM (8MB) and **8MB Flash** (confirmed via Waveshare wiki, Nov 2025 V2 revision).
 
 ### Forbidden
 - Do **NOT** reference "IO16" or "NeoPixel" from previous project logs
@@ -28,7 +28,12 @@ Target the **Waveshare ESP32-S3-ePaper-1.54 V2**. This board uses OPI PSRAM (8MB
 ## 2. Hardware Specification
 
 ### Microcontroller
-ESP32-S3 (WROOM-1 Module mapping)
+**ESP32-S3-PICO-1-N8R8** (V2 module)  
+- Flash: **8 MB** (Quad-SPI)  
+- PSRAM: **8 MB** (OPI/Octal-SPI, Octal PSRAM)  
+- Built-in 512 KB SRAM + 384 KB ROM  
+- Dual-core Xtensa LX7 @ up to 240 MHz  
+- Wi-Fi 802.11 b/g/n + Bluetooth 5 (BLE)
 
 ### Display
 - **Type:** 1.54" BW E-Paper (200x200 resolution)
@@ -41,22 +46,30 @@ ESP32-S3 (WROOM-1 Module mapping)
 
 ### Pinout Configuration (Strict)
 
-#### E-Paper Bus (Fixed by Hardware)
+#### E-Paper Bus (Fixed by Hardware — matches main.cpp #defines)
 | Signal | GPIO |
 |--------|------|
-| BUSY   | 25   |
-| RST    | 26   |
-| DC     | 27   |
-| CS     | 15   |
-| SCK    | 13   |
-| MOSI   | 14   |
+| BUSY   |  8   |
+| RST    |  9   |
+| DC     | 10   |
+| CS     | 11   |
+| SCK    | 12   |
+| MOSI   | 13   |
+
+#### Control Buttons
+| Signal | GPIO |
+|--------|------|
+| BOOT button | 0 |
+| PWR button  | 18 |
+| VBAT latch  | 17 |
 
 #### Dock Connector (2x6 Blind Mate Header)
-- **I2C Bus:** SDA (GPIO 17), SCL (GPIO 18) - Used for future dock expansion
-- **LEDs (DotStar):** Data (GPIO 10), Clock (GPIO 11) - Blind-fire signals to dock
-- **Button:** GPIO 3 (Input_Pullup) - User Action / Wake
+- **I2C Bus:** SDA (GPIO 45), SCL (GPIO 46) - Used for future dock expansion
+- **LEDs (DotStar):** Data (GPIO 47), Clock (GPIO 48) - Blind-fire signals to dock
 - **VSYS:** 5V Input (Charging)
 - **GND:** Common Ground
+
+> **Note:** DotStar library (`Adafruit DotStar`) is not yet in platformio.ini — add when dock LED control is implemented.
 
 ---
 

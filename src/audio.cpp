@@ -42,6 +42,7 @@
 
 static bool g_audioInitialized = false;
 static bool g_audioEnabled     = false;
+static bool g_audioSuspended   = false;
 
 // ---- ES8311 I2C helpers ----
 
@@ -218,7 +219,7 @@ static void i2s_flush_dma() {
 // Public API
 // ============================================================================
 
-void audioInit() {
+void audioInit(bool playTestTone) {
     if (g_audioInitialized) return;
 
     // Power on audio rail
@@ -253,11 +254,16 @@ void audioInit() {
     g_audioInitialized = true;
     Serial.println("[Audio] Initialized (I2S + ES8311)");
 
-    // ---- Startup test tone (unconditional — bypasses audioAlerts setting) ----
-    // This plays regardless of settings so we can verify hardware works.
-    Serial.println("[Audio] Playing startup test tone...");
-    audioTone(1000, 200);  // 1kHz for 200ms — should be clearly audible
-    Serial.println("[Audio] Test tone complete");
+    if (playTestTone) {
+        // ---- Startup test tone (unconditional — bypasses audioAlerts setting) ----
+        // This plays regardless of settings so we can verify hardware works.
+        Serial.println("[Audio] Playing startup test tone...");
+        audioTone(1000, 200);  // 1kHz for 200ms — should be clearly audible
+        Serial.println("[Audio] Test tone complete");
+    }
+
+    // Suspend audio hardware to save power — will auto-resume on next tone
+    audioSuspend();
 }
 
 void audioEnable() {
@@ -278,6 +284,7 @@ void audioDisable() {
 
 void audioTone(int freqHz, int durationMs) {
     if (!g_audioInitialized) return;
+    if (g_audioSuspended) audioResume();
 
     audioEnable();
 
@@ -309,24 +316,35 @@ void audioTone(int freqHz, int durationMs) {
     audioDisable();
 }
 
+// Auto-suspend helper — called after canned effects to power-gate until next use
+static void audioAutoSuspend() {
+    // Small delay so last DMA data clears, then suspend
+    delay(20);
+    audioSuspend();
+}
+
 // ---- Canned effects ----
 
 void audioClick() {
     audioTone(1000, 200);   // same as working startup test tone
+    audioAutoSuspend();
 }
 
 void audioBeep() {
     audioTone(1000, 200);   // same as working startup test tone
+    audioAutoSuspend();
 }
 
 void audioConfirm() {
     audioTone(1800, 120);
     delay(40);
     audioTone(2400, 120);
+    audioAutoSuspend();
 }
 
 void audioError() {
     audioTone(400, 300);
+    audioAutoSuspend();
 }
 
 void audioAttention(int repeats) {
@@ -335,6 +353,7 @@ void audioAttention(int repeats) {
         audioTone(1000, 200);   // same tone that worked at startup
         if (i < repeats - 1) delay(300);  // gap between bursts
     }
+    audioAutoSuspend();
 }
 
 void audioShutdown() {
@@ -344,5 +363,32 @@ void audioShutdown() {
     i2s_driver_uninstall(I2S_PORT);
     digitalWrite(AUDIO_PWR_PIN, HIGH);  // power off audio rail (active low)
     g_audioInitialized = false;
+    g_audioSuspended   = false;
     Serial.println("[Audio] Shutdown complete");
+}
+
+// ---- Power-gating: suspend/resume audio hardware between sounds ----
+//
+// Suspend powers off the codec rail and stops I2S clocks (~8mA savings).
+// Resume re-powers and re-inits the codec.  audioTone() calls resume
+// automatically, so callers don't need to worry about state.
+
+void audioSuspend() {
+    if (!g_audioInitialized || g_audioSuspended) return;
+    audioDisable();              // PA off
+    i2s_stop(I2S_PORT);          // stop I2S clocks
+    digitalWrite(AUDIO_PWR_PIN, HIGH);  // power off codec rail
+    g_audioSuspended = true;
+    Serial.println("[Audio] Suspended (power-gated)");
+}
+
+void audioResume() {
+    if (!g_audioInitialized || !g_audioSuspended) return;
+    digitalWrite(AUDIO_PWR_PIN, LOW);   // power on codec rail
+    delay(50);                          // let rail stabilize
+    i2s_start(I2S_PORT);               // restart I2S clocks (MCLK needed)
+    delay(50);                          // let MCLK stabilize
+    es8311_init();                      // re-init codec registers
+    g_audioSuspended = false;
+    Serial.println("[Audio] Resumed");
 }

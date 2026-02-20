@@ -34,6 +34,8 @@ button{width:100%;padding:12px;border:none;border-radius:8px;font-size:1rem;font
 .platform-tabs button.active{background:#5c9eff;color:#fff}
 .platform-tabs button:hover:not(.active){background:#1a4a7a;color:#ccc}
 .section-label{font-size:.75rem;text-transform:uppercase;color:#5c9eff;letter-spacing:1px;margin:20px 0 4px;border-bottom:1px solid #333;padding-bottom:4px}
+.day-lbl{display:flex;align-items:center;gap:3px;font-size:.85rem;color:#ccc}
+.day-lbl input{width:auto}
 </style>
 </head>
 <body>
@@ -128,6 +130,50 @@ button{width:100%;padding:12px;border:none;border-radius:8px;font-size:1rem;font
       <p class="help">Use <a href="https://discovery.meethue.com/" target="_blank" rel="noopener">Hue Discovery</a> to find your bridge IP. Target a specific light, group, or room by its ID.</p>
     </div>
 
+    <!-- Schedule / Office Hours -->
+    <div class="section-label">Schedule</div>
+    <label>Timezone</label>
+    <select id="timezone">
+      <option value="">— None (no schedule) —</option>
+      <option value="EST5EDT,M3.2.0,M11.1.0">US Eastern</option>
+      <option value="CST6CDT,M3.2.0,M11.1.0">US Central</option>
+      <option value="MST7MDT,M3.2.0,M11.1.0">US Mountain</option>
+      <option value="PST8PDT,M3.2.0,M11.1.0">US Pacific</option>
+      <option value="MST7">US Arizona (no DST)</option>
+      <option value="AST4ADT,M3.2.0,M11.1.0">Atlantic</option>
+      <option value="HST10">Hawaii</option>
+      <option value="AKST9AKDT,M3.2.0,M11.1.0">Alaska</option>
+      <option value="GMT0BST,M3.5.0/1,M10.5.0">UK / Ireland</option>
+      <option value="CET-1CEST,M3.5.0,M10.5.0/3">Central Europe</option>
+      <option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Eastern Europe</option>
+      <option value="IST-5:30">India</option>
+      <option value="CST-8">China / Singapore</option>
+      <option value="JST-9">Japan / Korea</option>
+      <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Australia Eastern</option>
+      <option value="NZST-12NZDT,M9.5.0,M4.1.0/3">New Zealand</option>
+    </select>
+
+    <div id="officeHoursFields" class="hidden">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
+        <input type="checkbox" id="ohEnabled" style="width:auto">
+        Enable office hours (sleep outside hours on battery)
+      </label>
+      <div style="display:flex;gap:12px;margin-top:8px">
+        <div style="flex:1"><label>Start</label><input id="ohStart" type="time" value="08:00"></div>
+        <div style="flex:1"><label>End</label><input id="ohEnd" type="time" value="17:00"></div>
+      </div>
+      <label style="margin-top:8px">Active Days</label>
+      <div id="dayChecks" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+        <label class="day-lbl"><input type="checkbox" value="0" checked> Mon</label>
+        <label class="day-lbl"><input type="checkbox" value="1" checked> Tue</label>
+        <label class="day-lbl"><input type="checkbox" value="2" checked> Wed</label>
+        <label class="day-lbl"><input type="checkbox" value="3" checked> Thu</label>
+        <label class="day-lbl"><input type="checkbox" value="4" checked> Fri</label>
+        <label class="day-lbl"><input type="checkbox" value="5"> Sat</label>
+        <label class="day-lbl"><input type="checkbox" value="6"> Sun</label>
+      </div>
+    </div>
+
     <button id="btnSave">Save &amp; Reboot Pod</button>
   </div>
 </div>
@@ -146,7 +192,9 @@ const UUID = {
   lightKey:     '0001ff08-0000-1000-8000-00805f9b34fb',
   lightAux:     '0001ff09-0000-1000-8000-00805f9b34fb',
   clientSecret: '0001ff0a-0000-1000-8000-00805f9b34fb',
-  platform:     '0001ff0b-0000-1000-8000-00805f9b34fb'
+  platform:     '0001ff0b-0000-1000-8000-00805f9b34fb',
+  timezone:     '0001ff0c-0000-1000-8000-00805f9b34fb',
+  officeHours:  '0001ff0d-0000-1000-8000-00805f9b34fb'
 };
 
 let svc = null;
@@ -174,6 +222,11 @@ function updateLightFields() {
   $('hueFields').classList.toggle('hidden', t !== '3');
 }
 $('lightType').addEventListener('change', updateLightFields);
+
+// --- Timezone shows/hides office hours fields ---
+$('timezone').addEventListener('change', () => {
+  $('officeHoursFields').classList.toggle('hidden', !$('timezone').value);
+});
 
 // --- BLE Connect ---
 $('btnConnect').addEventListener('click', async () => {
@@ -246,6 +299,29 @@ $('btnConnect').addEventListener('click', async () => {
     // Show Hue fields if light type is Hue
     updateLightFields();
 
+    // Read timezone + office hours
+    const tz = await tryRead(UUID.timezone, null);
+    if (tz) {
+      // Set dropdown if matching, otherwise leave as "None"
+      const opt = Array.from($('timezone').options).find(o => o.value === tz);
+      if (opt) $('timezone').value = tz;
+      $('officeHoursFields').classList.toggle('hidden', !tz);
+    }
+    const oh = await tryRead(UUID.officeHours, null);
+    if (oh) {
+      // Parse "enabled,HH:MM,HH:MM,daymask"
+      const parts = oh.split(',');
+      if (parts.length >= 4) {
+        $('ohEnabled').checked = parts[0] === '1';
+        $('ohStart').value = parts[1];
+        $('ohEnd').value = parts[2];
+        const dm = parseInt(parts[3]) || 0;
+        document.querySelectorAll('#dayChecks input').forEach(cb => {
+          cb.checked = !!(dm & (1 << parseInt(cb.value)));
+        });
+      }
+    }
+
   } catch(e) {
     stat('Connection failed: ' + e.message, 'err');
   }
@@ -299,6 +375,19 @@ $('btnSave').addEventListener('click', async () => {
       const hueTarget = $('hueTargetType').value + ($('hueTargetId').value || '1');
       if (lk) await write(UUID.lightKey, lk);
       await write(UUID.lightAux, hueTarget);
+    }
+    // Write timezone + office hours
+    const tz = $('timezone').value;
+    await write(UUID.timezone, tz);
+    if (tz) {
+      let dm = 0;
+      document.querySelectorAll('#dayChecks input:checked').forEach(cb => {
+        dm |= (1 << parseInt(cb.value));
+      });
+      const oh = ($('ohEnabled').checked ? '1' : '0') + ',' +
+                 ($('ohStart').value || '08:00') + ',' +
+                 ($('ohEnd').value || '17:00') + ',' + dm;
+      await write(UUID.officeHours, oh);
     }
     stat('Saving & rebooting Pod...', 'info');
     await write(UUID.save, '1');

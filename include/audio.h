@@ -14,7 +14,8 @@
 #include <Arduino.h>
 
 // Initialise I2C to ES8311, configure codec, set up I2S output.
-void audioInit();
+// Pass playTestTone=false to skip the startup beep (e.g. deep-sleep resume).
+void audioInit(bool playTestTone = true);
 
 // Enable/disable the power amplifier and audio power rail.
 void audioEnable();
@@ -22,6 +23,11 @@ void audioDisable();
 
 // Graceful shutdown — uninstall I2S, power off codec.
 void audioShutdown();
+
+// Suspend audio hardware to save power (power-gate codec + I2S stop).
+// Call audioResume() before the next tone.  Safe to call multiple times.
+void audioSuspend();
+void audioResume();
 
 // --- Tone primitives ---
 

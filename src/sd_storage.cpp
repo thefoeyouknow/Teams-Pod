@@ -99,7 +99,7 @@ bool sdLoadConfig(SdConfig& cfg) {
         return false;
     }
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, f);
     f.close();
 
@@ -114,6 +114,12 @@ bool sdLoadConfig(SdConfig& cfg) {
     cfg.presenceInterval = doc["presenceInterval"] | cfg.presenceInterval;
     cfg.fullRefreshEvery = doc["fullRefreshEvery"] | cfg.fullRefreshEvery;
     cfg.timezone         = doc["timezone"]         | cfg.timezone.c_str();
+    cfg.officeHoursEnabled = doc["officeHoursEnabled"] | cfg.officeHoursEnabled;
+    cfg.officeStartHour    = doc["officeStartHour"]    | cfg.officeStartHour;
+    cfg.officeStartMin     = doc["officeStartMin"]     | cfg.officeStartMin;
+    cfg.officeEndHour      = doc["officeEndHour"]      | cfg.officeEndHour;
+    cfg.officeEndMin       = doc["officeEndMin"]       | cfg.officeEndMin;
+    cfg.officeDays         = doc["officeDays"]         | cfg.officeDays;
 
     Serial.printf("[SD] Config loaded: platform=%d invert=%d audio=%d interval=%d fullEvery=%d tz=%s\n",
                   cfg.platform, cfg.invertDisplay, cfg.audioAlerts,
@@ -125,13 +131,19 @@ bool sdLoadConfig(SdConfig& cfg) {
 bool sdSaveConfig(const SdConfig& cfg) {
     if (!g_sd_mounted) return false;
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
     doc["platform"]         = cfg.platform;
     doc["invertDisplay"]    = cfg.invertDisplay;
     doc["audioAlerts"]      = cfg.audioAlerts;
     doc["presenceInterval"] = cfg.presenceInterval;
     doc["fullRefreshEvery"] = cfg.fullRefreshEvery;
-    doc["timezone"]         = cfg.timezone;
+    doc["timezone"]           = cfg.timezone;
+    doc["officeHoursEnabled"] = cfg.officeHoursEnabled;
+    doc["officeStartHour"]    = cfg.officeStartHour;
+    doc["officeStartMin"]     = cfg.officeStartMin;
+    doc["officeEndHour"]      = cfg.officeEndHour;
+    doc["officeEndMin"]       = cfg.officeEndMin;
+    doc["officeDays"]         = cfg.officeDays;
 
     File f = SD_MMC.open(CONFIG_PATH, FILE_WRITE);
     if (!f) {
@@ -267,5 +279,100 @@ bool sdLoadBitmap(const char* path, uint8_t* buf, size_t bufLen) {
     }
 
     Serial.printf("[SD] Loaded bitmap %s (%d bytes)\n", path, sz);
+    return true;
+}
+
+// ============================================================================
+// BMP file loader — 1-bit 200×200 uncompressed
+// ============================================================================
+
+static uint32_t readLE32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static uint16_t readLE16(const uint8_t* p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+bool sdLoadBMP(const char* path, uint8_t* pixelBuf, size_t bufLen) {
+    if (!g_sd_mounted || !pixelBuf) return false;
+
+    File f = SD_MMC.open(path, FILE_READ);
+    if (!f) {
+        Serial.printf("[SD] BMP not found: %s\n", path);
+        return false;
+    }
+
+    // Read BMP + DIB header (62 bytes typical for 1-bit BMP with colour table)
+    uint8_t hdr[66];
+    size_t hdrRead = f.read(hdr, 66);
+    if (hdrRead < 54) {
+        Serial.println("[SD] BMP header too short");
+        f.close();
+        return false;
+    }
+
+    if (hdr[0] != 'B' || hdr[1] != 'M') {
+        Serial.println("[SD] Not a BMP file");
+        f.close();
+        return false;
+    }
+
+    uint32_t dataOffset  = readLE32(hdr + 10);
+    int32_t  width       = (int32_t)readLE32(hdr + 18);
+    int32_t  height      = (int32_t)readLE32(hdr + 22);
+    uint16_t bpp         = readLE16(hdr + 28);
+    uint32_t compression = readLE32(hdr + 30);
+
+    if (width != 200 || (height != 200 && height != -200) || bpp != 1 || compression != 0) {
+        Serial.printf("[SD] BMP format error: %dx%d %dbpp comp=%d\n",
+                      width, height, bpp, compression);
+        f.close();
+        return false;
+    }
+
+    // Check colour table (starts at byte 54) to decide if bits need inverting.
+    // Standard: entry 0 = black (0,0,0), entry 1 = white (255,255,255).
+    // If entry 0 is bright, colours are swapped and we XOR the output.
+    bool invertBits = false;
+    if (hdrRead >= 58) {
+        // Entry 0: B,G,R,A at bytes 54-57
+        if (hdr[54] > 128 || hdr[55] > 128 || hdr[56] > 128)
+            invertBits = true;
+    }
+
+    int absHeight   = (height > 0) ? height : -height;
+    bool bottomUp   = (height > 0);
+    int rowBytes    = (width + 7) / 8;                // 25 for 200px
+    int rowStride   = ((rowBytes + 3) / 4) * 4;       // 28 (padded to 4)
+    int outRowBytes = rowBytes;                        // 25 (no padding)
+
+    if ((size_t)(outRowBytes * absHeight) > bufLen) {
+        Serial.println("[SD] BMP pixel buffer too small");
+        f.close();
+        return false;
+    }
+
+    f.seek(dataOffset);
+
+    uint8_t rowBuf[32];   // max 28 bytes per row for 200px
+    for (int row = 0; row < absHeight; row++) {
+        if (f.read(rowBuf, rowStride) != (size_t)rowStride) {
+            Serial.printf("[SD] BMP short read at row %d\n", row);
+            f.close();
+            return false;
+        }
+        int outRow = bottomUp ? (absHeight - 1 - row) : row;
+        memcpy(pixelBuf + outRow * outRowBytes, rowBuf, outRowBytes);
+    }
+    f.close();
+
+    // Normalise: ensure bit 0 = black, bit 1 = white
+    if (invertBits) {
+        int total = outRowBytes * absHeight;
+        for (int i = 0; i < total; i++) pixelBuf[i] ^= 0xFF;
+    }
+
+    Serial.printf("[SD] BMP loaded: %s (%dx%d)\n", path, width, absHeight);
     return true;
 }

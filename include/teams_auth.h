@@ -8,7 +8,7 @@ struct DeviceCodeResponse {
     String device_code;
     String user_code;
     String verification_uri;
-    String qr_url;          // full URL for QR code (includes ?otc=code)
+    String qr_url;          // verification URL for QR code (no otc param)
     int    expires_in;       // seconds until code expires
     int    interval;         // polling interval in seconds
     bool   valid;

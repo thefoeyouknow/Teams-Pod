@@ -24,4 +24,10 @@ int batteryPercent(float voltage);
 // IC keeps voltage near 4.2V so this detects the small overshoot.
 bool batteryOnUSB(float voltage);
 
+// Green charge LED on GPIO 3 (active HIGH)
+#define CHARGE_LED_PIN 3
+
+// Update charge LED: on when USB connected, off on battery
+void batteryUpdateChargeLED(bool usbConnected);
+
 #endif

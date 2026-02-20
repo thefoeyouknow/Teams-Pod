@@ -21,6 +21,8 @@
 #include <esp_sleep.h>
 #include <esp_wifi.h>
 #include <driver/gpio.h>
+#include <time.h>
+#include <driver/rtc_io.h>
 
 #include "ble_setup.h"
 #include "display_ui.h"
@@ -87,10 +89,16 @@ static int                 g_partialCount       = 0;      // track partial refre
 
 // ---- Power management ----
 static unsigned long       g_lastBatteryCheck   = 0;
-static const unsigned long BATTERY_CHECK_MS     = 60000;  // check every 60 s
 static const int           BATTERY_WARN_PCT     = 15;
 static const int           BATTERY_SHUTDOWN_PCT = 5;
-static bool                g_lowBattWarned      = false;
+static bool                g_serialDisabled     = false;
+
+// ---- Deep sleep state (RTC memory — survives deep sleep) ----
+RTC_DATA_ATTR static bool    rtc_deepSleepActive = false;
+RTC_DATA_ATTR static uint8_t rtc_stableCount     = 0;
+RTC_DATA_ATTR static char    rtc_lastAvailability[32] = "";
+
+static const int DEEP_SLEEP_THRESHOLD = 3;  // unchanged polls before deep sleep
 
 // ============================================================================
 // Forward declarations
@@ -103,11 +111,19 @@ void handleMenu();
 void handleSettings();
 void waitForAnyButton();
 void checkBattery();
+void enterDeepSleep(int intervalSec);
+void syncNTP();
+bool isOfficeHours();
+int  secondsUntilOfficeStart();
 
 // ============================================================================
 // setup()
 // ============================================================================
 void setup() {
+    // Release ALL GPIO holds from deep sleep so pins can be driven again
+    gpio_hold_dis((gpio_num_t)VBAT_PWR_PIN);
+    gpio_deep_sleep_hold_dis();
+
     // Latch battery power ON immediately (must be first)
     pinMode(VBAT_PWR_PIN, OUTPUT);
     digitalWrite(VBAT_PWR_PIN, HIGH);
@@ -135,6 +151,145 @@ void setup() {
     pinMode(BOOT_BUTTON, INPUT_PULLUP);
     pinMode(PWR_BUTTON,  INPUT_PULLUP);
 
+    // ========================================================================
+    // Deep sleep fast-path — minimal wake, poll, return to sleep
+    // Skips splash, BLE, audio init, discovery to minimise wake time & power
+    // ========================================================================
+    if (reason == ESP_RST_DEEPSLEEP && rtc_deepSleepActive) {
+        esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
+
+        if (wakeup == ESP_SLEEP_WAKEUP_TIMER) {
+            Serial.println("[DeepSleep] Timer wake — fast poll");
+            setCpuFrequencyMhz(80);
+
+            // --- Battery check first (may shutdown before spending power) ---
+            batteryInit();
+            float voltage = batteryReadVoltage();
+            int   pct     = batteryPercent(voltage);
+
+            if (batteryOnUSB(voltage)) {
+                // USB plugged in — exit to full normal boot (WOT mode)
+                Serial.println("[DeepSleep] USB detected — full-power boot");
+                rtc_deepSleepActive = false;
+                rtc_stableCount     = 0;
+                // Fall through to normal boot below
+                goto normalBoot;
+            }
+
+            // Critical battery → shutdown
+            if (pct <= BATTERY_SHUTDOWN_PCT) {
+                Serial.printf("[DeepSleep] CRITICAL %d%% — shutdown\n", pct);
+                initializeHardware();
+                audioInit(false);
+                audioAttention(3);   // forced beep
+                drawLowBatteryScreen(pct, true);
+                delay(3000);
+                checkPowerOff();
+                return;
+            }
+
+            // Low battery → forced beep every wake (regardless of settings)
+            if (pct <= BATTERY_WARN_PCT) {
+                Serial.printf("[DeepSleep] Low battery %d%% — forced beep\n", pct);
+                audioInit(false);
+                audioAttention(1);
+            }
+
+            // --- Load config + credentials ---
+            if (sdInit()) Serial.println("[DeepSleep] SD mounted");
+            loadSettings(g_settings);
+            loadLightConfig(g_lightCfg);
+            loadCredentialsFromNVS();
+            g_lightCfg.type     = (LightType)g_light_type.toInt();
+            g_lightCfg.ip       = g_light_ip;
+            g_settings.platform = (Platform)g_platform.toInt();
+
+            // --- WiFi connect (need 240 MHz for radio) ---
+            setCpuFrequencyMhz(240);
+            if (!connectWiFi()) {
+                Serial.println("[DeepSleep] WiFi failed — back to sleep");
+                setCpuFrequencyMhz(80);
+                enterDeepSleep(g_settings.presenceInterval);
+                return;
+            }
+
+            // --- NTP sync + office hours check ---
+            syncNTP();
+            if (!isOfficeHours()) {
+                Serial.println("[DeepSleep] Outside office hours — sleeping");
+                int sleepSec = secondsUntilOfficeStart();
+                if (sleepSec < 60) sleepSec = 60;
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+                setCpuFrequencyMhz(80);
+                enterDeepSleep(sleepSec);
+                return;
+            }
+
+            // --- Token + presence poll ---
+            PresenceState st;
+            bool gotPresence = false;
+
+            if (g_settings.platform == PLATFORM_ZOOM) {
+                if (zoomFetchToken(g_tenant_id, g_client_id, g_client_secret))
+                    gotPresence = getZoomPresence(zoomGetAccessToken(), st);
+            } else {
+                loadAuthFromNVS();
+                if (refreshAccessToken(g_client_id, g_tenant_id))
+                    gotPresence = getPresence(getAccessToken(), st);
+            }
+
+            bool changed = gotPresence &&
+                            strcmp(st.availability.c_str(), rtc_lastAvailability) != 0;
+
+            if (!changed) {
+                // UNCHANGED — back to deep sleep
+                rtc_stableCount++;
+                Serial.printf("[DeepSleep] Unchanged (%s), stable=%d — sleeping\n",
+                              rtc_lastAvailability, rtc_stableCount);
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+                setCpuFrequencyMhz(80);
+                enterDeepSleep(g_settings.presenceInterval);
+                return;
+            }
+
+            // STATUS CHANGED — update display & lights, enter normal mode
+            Serial.printf("[DeepSleep] Changed: %s → %s\n",
+                          rtc_lastAvailability, st.availability.c_str());
+            strncpy(rtc_lastAvailability, st.availability.c_str(), 31);
+            rtc_lastAvailability[31] = '\0';
+            rtc_deepSleepActive = false;
+            rtc_stableCount     = 0;
+
+            initializeHardware();
+            drawStatusScreen(st.availability.c_str(), st.activity.c_str());
+            lightDevicesLoad();
+            lightSetPresence(g_lightCfg, st.availability.c_str());
+
+            g_lastAvailability  = st.availability;
+            g_currentPresence   = st;
+            g_state             = STATE_RUNNING;
+            g_lastPresenceCheck = millis();
+            g_lastBatteryCheck  = millis();
+
+            audioInit(false);  // safe to call again — has internal guard
+
+            if (!batteryOnUSB(batteryReadVoltage())) setCpuFrequencyMhz(80);
+            return;  // enter loop() in STATE_RUNNING
+
+        } else {
+            // Button wake from deep sleep — full boot
+            Serial.println("[DeepSleep] Button wake — full boot");
+            rtc_deepSleepActive = false;
+            rtc_stableCount     = 0;
+            // Fall through to normalBoot
+        }
+    }
+
+normalBoot:
+    bool skipSplash = (reason == ESP_RST_DEEPSLEEP);
+
     initializeHardware();
 
     // Mount SD card (before settings, so SD config is preferred)
@@ -147,34 +302,37 @@ void setup() {
     loadSettings(g_settings);
     loadLightConfig(g_lightCfg);
 
-    // Audio init (ES8311 + I2S)
-    audioInit();
+    // Audio init (ES8311 + I2S) — skip test tone on deep sleep resume
+    audioInit(!skipSplash);
 
-    drawSplashScreen(platformName(g_settings.platform));
+    if (!skipSplash)
+        drawSplashScreen(platformName(g_settings.platform));
 
     // --- Splash gate: wait for BOOT press (short = continue, hold 3s = reset)
-    Serial.println("[Main] Splash — press BOOT to continue, hold 3s for reset");
-    while (true) {
-        if (digitalRead(BOOT_BUTTON) == LOW) {
-            unsigned long holdStart = millis();
-            // Wait for release or 3-second hold
-            while (digitalRead(BOOT_BUTTON) == LOW) {
-                if (millis() - holdStart >= 3000) {
-                    Serial.println("[Main] BOOT held 3s — factory reset");
-                    drawErrorScreen("Factory Reset", "Clearing all data...");
-                    clearStoredCredentials();
-                    clearAuthNVS();
-                    delay(2000);
-                    ESP.restart();
+    if (!skipSplash) {
+        Serial.println("[Main] Splash — press BOOT to continue, hold 3s for reset");
+        while (true) {
+            if (digitalRead(BOOT_BUTTON) == LOW) {
+                unsigned long holdStart = millis();
+                // Wait for release or 3-second hold
+                while (digitalRead(BOOT_BUTTON) == LOW) {
+                    if (millis() - holdStart >= 3000) {
+                        Serial.println("[Main] BOOT held 3s — factory reset");
+                        drawErrorScreen("Factory Reset", "Clearing all data...");
+                        clearStoredCredentials();
+                        clearAuthNVS();
+                        delay(2000);
+                        ESP.restart();
+                    }
+                    delay(50);
                 }
-                delay(50);
+                // Short press — continue boot
+                Serial.println("[Main] BOOT pressed — continuing");
+                if (g_settings.audioAlerts) audioBeep();
+                break;
             }
-            // Short press — continue boot
-            Serial.println("[Main] BOOT pressed — continuing");
-            if (g_settings.audioAlerts) audioBeep();
-            break;
+            delay(50);
         }
-        delay(50);
     }
 
     // --- BLE always initialised (also opens NVS) ---
@@ -189,6 +347,10 @@ void setup() {
         return;
     }
     loadCredentialsFromNVS();
+
+    // BLE no longer needed — free ~60 KB of RAM
+    deinitBLE();
+
     // Sync BLE light globals → LightConfig (BLE saves to puck_creds namespace)
     g_lightCfg.type = (LightType)g_light_type.toInt();
     g_lightCfg.ip   = g_light_ip;
@@ -206,9 +368,27 @@ void setup() {
         return;
     }
 
+    // --- NTP time sync ---
+    syncNTP();
+
+    // --- Office hours check (battery only) ---
+    if (!batteryOnUSB(batteryReadVoltage()) && !isOfficeHours()) {
+        Serial.println("[Power] Outside office hours at boot — deep sleep");
+        int sleepSec = secondsUntilOfficeStart();
+        if (sleepSec < 60) sleepSec = 60;
+        rtc_deepSleepActive = true;
+        enterDeepSleep(sleepSec);
+        return;
+    }
+
     // --- Light devices: load cache then discover ---
     lightDevicesLoad();
-    lightDiscoverAll(g_lightCfg);
+    // Skip discovery on battery if we have cached devices
+    if (batteryOnUSB(batteryReadVoltage()) || lightDevicesGet().empty()) {
+        lightDiscoverAll(g_lightCfg);
+    } else {
+        Serial.println("[Main] Battery mode — using cached light devices");
+    }
 
     // --- Auth: platform-specific ---
     if (g_settings.platform == PLATFORM_ZOOM) {
@@ -250,6 +430,9 @@ void setup() {
             drawErrorScreen("Auth Error", detail);
         }
     }
+
+    // Drop to 80 MHz on battery for idle power savings
+    if (!batteryOnUSB(batteryReadVoltage())) setCpuFrequencyMhz(80);
 }
 
 // ============================================================================
@@ -265,12 +448,28 @@ void loop() {
 
     // ---- Device-code auth: poll at interval ----------------------------
     case STATE_AUTH_DEVICE_CODE: {
+        static bool showingQR = true;  // track which view is displayed
+
         if (millis() - g_authStartTime >
             (unsigned long)g_deviceCode.expires_in * 1000UL) {
             g_state = STATE_ERROR;
             drawErrorScreen("Auth Timeout", "Code expired — restart");
             break;
         }
+
+        // BOOT button toggles between QR and code text
+        if (digitalRead(BOOT_BUTTON) == LOW) {
+            delay(200);  // debounce
+            while (digitalRead(BOOT_BUTTON) == LOW) delay(50);
+            showingQR = !showingQR;
+            if (showingQR) {
+                drawQRAuthScreen(g_deviceCode.user_code.c_str(),
+                                 g_deviceCode.qr_url.c_str());
+            } else {
+                drawAuthCodeScreen(g_deviceCode.user_code.c_str());
+            }
+        }
+
         if (millis() - g_lastPollTime >=
             (unsigned long)g_deviceCode.interval * 1000UL) {
             g_lastPollTime = millis();
@@ -278,6 +477,7 @@ void loop() {
             int r = pollForToken(g_client_id, g_tenant_id,
                                  g_deviceCode.device_code);
             if (r == 1) {
+                showingQR = true;  // reset for next time
                 saveAuthToNVS();
                 g_state = STATE_RUNNING;
                 g_lastPresenceCheck = 0;  // force immediate poll
@@ -300,21 +500,57 @@ void loop() {
     // ---- Normal operation: poll presence --------------------------------
     case STATE_RUNNING: {
         bool onUSB = batteryOnUSB(batteryReadVoltage());
+        batteryUpdateChargeLED(onUSB);
+
+        // --- Charging = WOT: full speed, serial on, no sleep ---
+        if (onUSB) {
+            if (g_serialDisabled) {
+                Serial.begin(115200);
+                g_serialDisabled = false;
+                Serial.println("[Power] USB — full-power mode");
+            }
+            rtc_stableCount = 0;  // reset deep sleep counter while charging
+        } else {
+            // On battery: disable Serial to save ~2-3 mA (one-shot)
+            if (!g_serialDisabled) {
+                Serial.println("[Power] Battery — disabling Serial");
+                Serial.flush();
+                Serial.end();
+                g_serialDisabled = true;
+            }
+        }
 
         // --- Presence poll ---
         bool needPoll = (millis() - g_lastPresenceCheck >=
                          (unsigned long)g_settings.presenceInterval * 1000UL);
         if (needPoll) {
+            // Office hours check (on battery only)
+            if (!onUSB && !isOfficeHours()) {
+                Serial.println("[Power] Outside office hours — deep sleep");
+                int sleepSec = secondsUntilOfficeStart();
+                if (sleepSec < 60) sleepSec = 60;  // minimum 1 min
+                strncpy(rtc_lastAvailability, g_lastAvailability.c_str(), 31);
+                rtc_lastAvailability[31] = '\0';
+                rtc_deepSleepActive = true;
+                enterDeepSleep(sleepSec);
+                return;  // never reached
+            }
+
+            // Boost CPU for WiFi + HTTPS
+            if (!onUSB) setCpuFrequencyMhz(240);
+
             if (WiFi.status() != WL_CONNECTED) {
                 Serial.println("[Main] Reconnecting WiFi for poll...");
                 if (!connectWiFi()) {
                     Serial.println("[Main] WiFi failed, will retry next cycle");
-                    g_lastPresenceCheck = millis();  // avoid tight retry loop
+                    g_lastPresenceCheck = millis();
+                    if (!onUSB) setCpuFrequencyMhz(80);
                     delay(1000);
                     break;
                 }
             }
             g_lastPresenceCheck = millis();
+
             // Platform-aware token refresh
             if (g_settings.platform == PLATFORM_ZOOM) {
                 if (zoomIsTokenExpiringSoon())
@@ -323,13 +559,24 @@ void loop() {
                 if (isTokenExpiringSoon())
                     refreshAccessToken(g_client_id, g_tenant_id);
             }
-            updateAndDisplayPresence();
-        }
 
-        // --- Periodic battery check (battery only) ---
-        if (!onUSB && millis() - g_lastBatteryCheck >= BATTERY_CHECK_MS) {
-            g_lastBatteryCheck = millis();
-            checkBattery();
+            // Track status change for deep sleep decision
+            String oldAvail = g_lastAvailability;
+            updateAndDisplayPresence();
+
+            if (!onUSB) {
+                // Track consecutive unchanged polls
+                if (g_lastAvailability == oldAvail && !oldAvail.isEmpty()) {
+                    rtc_stableCount++;
+                } else {
+                    rtc_stableCount = 0;
+                }
+
+                // Battery check (merged into wake cycle — no separate timer)
+                checkBattery();
+
+                setCpuFrequencyMhz(80);  // back to low speed
+            }
         }
 
         // --- BOOT = manual refresh ---
@@ -338,9 +585,12 @@ void loop() {
             if (digitalRead(BOOT_BUTTON) == LOW) {
                 if (g_settings.audioAlerts) audioClick();
                 Serial.println("[Main] Manual refresh");
+                if (!onUSB) setCpuFrequencyMhz(240);
                 if (WiFi.status() != WL_CONNECTED) connectWiFi();
                 updateAndDisplayPresence();
                 g_lastPresenceCheck = millis();
+                rtc_stableCount = 0;  // user activity resets deep sleep
+                if (!onUSB) setCpuFrequencyMhz(80);
                 while (digitalRead(BOOT_BUTTON) == LOW) delay(50);
             }
         }
@@ -358,26 +608,33 @@ void loop() {
             if (millis() - pressStart < 3000) {
                 if (g_settings.audioAlerts) audioClick();
                 delay(100);
-                if (WiFi.status() != WL_CONNECTED) connectWiFi();
+                rtc_stableCount = 0;  // user activity resets deep sleep
                 handleMenu();
             }
             break;  // re-evaluate state after menu
         }
 
-        // --- Power management: light sleep on battery, simple delay on USB ---
+        // --- Power management ---
         if (onUSB) {
-            // USB connected — no sleep, keep WiFi alive, just idle
+            // USB: full power, no sleep, WiFi stays up
             delay(100);
+        } else if (rtc_stableCount >= DEEP_SLEEP_THRESHOLD) {
+            // Stable long enough — enter deep sleep
+            Serial.printf("[Power] %d stable polls — deep sleep\n",
+                          rtc_stableCount);
+            strncpy(rtc_lastAvailability, g_lastAvailability.c_str(), 31);
+            rtc_lastAvailability[31] = '\0';
+            rtc_deepSleepActive = true;
+            enterDeepSleep(g_settings.presenceInterval);
+            // Never returns
         } else {
-            // Battery — light sleep between polls to save power
+            // Light sleep until next poll (building toward deep sleep)
             unsigned long now      = millis();
             unsigned long nextPoll = g_lastPresenceCheck +
                                      (unsigned long)g_settings.presenceInterval * 1000UL;
-            unsigned long nextBatt = g_lastBatteryCheck + BATTERY_CHECK_MS;
-            unsigned long nextWake = min(nextPoll, nextBatt);
 
-            if (nextWake > now + 1000) {
-                unsigned long sleepMs = nextWake - now - 500;  // 500ms margin
+            if (nextPoll > now + 1000) {
+                unsigned long sleepMs = nextPoll - now - 500;
 
                 // Suspend WiFi for sleep
                 if (WiFi.getMode() != WIFI_OFF) {
@@ -534,43 +791,77 @@ void updateAndDisplayPresence() {
 }
 
 // ============================================================================
+// NTP + Office Hours helpers
+// ============================================================================
+void syncNTP() {
+    if (g_settings.timezone.length() == 0) return;
+    Serial.printf("[NTP] Syncing with TZ: %s\n", g_settings.timezone.c_str());
+    configTzTime(g_settings.timezone.c_str(), "pool.ntp.org", "time.nist.gov");
+    struct tm t;
+    if (getLocalTime(&t, 5000)) {
+        Serial.printf("[NTP] Time: %04d-%02d-%02d %02d:%02d:%02d (wday=%d)\n",
+                      t.tm_year+1900, t.tm_mon+1, t.tm_mday,
+                      t.tm_hour, t.tm_min, t.tm_sec, t.tm_wday);
+    } else {
+        Serial.println("[NTP] Failed to get time");
+    }
+}
+
+bool isOfficeHours() {
+    if (!g_settings.officeHoursEnabled) return true;  // disabled = always on
+    struct tm t;
+    if (!getLocalTime(&t, 100)) return true;  // can't tell = assume on
+    // tm_wday: 0=Sun,1=Mon..6=Sat → remap to bit0=Mon..bit6=Sun
+    int dayBit = (t.tm_wday == 0) ? 6 : (t.tm_wday - 1);
+    if (!(g_settings.officeDays & (1 << dayBit))) return false;
+    int nowMin   = t.tm_hour * 60 + t.tm_min;
+    int startMin = g_settings.officeStartHour * 60 + g_settings.officeStartMin;
+    int endMin   = g_settings.officeEndHour   * 60 + g_settings.officeEndMin;
+    return (nowMin >= startMin && nowMin < endMin);
+}
+
+int secondsUntilOfficeStart() {
+    struct tm t;
+    if (!getLocalTime(&t, 100)) return 3600;  // fallback 1h
+    int startMin = g_settings.officeStartHour * 60 + g_settings.officeStartMin;
+    // Check remaining days this week + wrap
+    for (int ahead = 0; ahead < 8; ahead++) {
+        int wday = (t.tm_wday + ahead) % 7;
+        int dayBit = (wday == 0) ? 6 : (wday - 1);
+        if (!(g_settings.officeDays & (1 << dayBit))) continue;
+        int nowMin = (ahead == 0) ? (t.tm_hour * 60 + t.tm_min) : 0;
+        if (ahead == 0 && nowMin >= startMin) continue;  // already past start today
+        int secsToday = (startMin - nowMin) * 60 - t.tm_sec;
+        return ahead * 86400 + secsToday;
+    }
+    return 3600;  // fallback
+}
+
+// ============================================================================
 // Battery check — warn at low %, auto-shutdown at critical %
 // ============================================================================
 void checkBattery() {
     float voltage = batteryReadVoltage();
     int pct = batteryPercent(voltage);
 
-    if (batteryOnUSB(voltage)) {
-        g_lowBattWarned = false;
+    if (batteryOnUSB(voltage))
         return;  // USB powered — no concern
-    }
 
     // Critical — force shutdown to protect battery
     if (pct <= BATTERY_SHUTDOWN_PCT) {
         Serial.printf("[Power] CRITICAL %d%% — auto-shutdown\n", pct);
-        if (g_settings.audioAlerts) audioError();
+        audioAttention(3);   // forced beep regardless of settings
         drawLowBatteryScreen(pct, true);
         delay(3000);
         checkPowerOff();
         return;
     }
 
-    // Low warning — show briefly then resume
-    if (pct <= BATTERY_WARN_PCT && !g_lowBattWarned) {
+    // Low warning — forced beep every poll cycle at ≤15%
+    if (pct <= BATTERY_WARN_PCT) {
         Serial.printf("[Power] Low battery: %d%%\n", pct);
-        if (g_settings.audioAlerts) audioError();
-        drawLowBatteryScreen(pct, false);
-        delay(3000);
-        if (g_lastAvailability.length() > 0) {
-            drawStatusScreen(g_currentPresence.availability.c_str(),
-                             g_currentPresence.activity.c_str());
-        }
-        g_lowBattWarned = true;
+        audioAttention(1);   // forced beep
     }
-
-    // Hysteresis — reset warning once battery recovers 5% above threshold
-    if (pct > BATTERY_WARN_PCT + 5)
-        g_lowBattWarned = false;
 }
 
 // ============================================================================
@@ -579,6 +870,7 @@ void checkBattery() {
 void checkPowerOff() {
     Serial.println("[Main] Powering off...");
     // Graceful cleanup — turn off peripherals before power cut
+    batteryUpdateChargeLED(false);
     lightOff(g_lightCfg);
     audioShutdown();
     WiFi.disconnect(true);
@@ -587,11 +879,47 @@ void checkPowerOff() {
     // Wait for button release
     while (digitalRead(PWR_BUTTON) == LOW) delay(50);
     delay(500);  // let user see the screen
+    // Release GPIO holds from deep sleep before driving pin LOW
+    gpio_hold_dis((gpio_num_t)VBAT_PWR_PIN);
+    gpio_deep_sleep_hold_dis();
     // Release power latch — device will lose power
     digitalWrite(VBAT_PWR_PIN, LOW);
-    // If still running (USB powered), enter deep sleep
+    // If still running (USB powered), enter deep sleep with no wake sources
     delay(100);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     esp_deep_sleep_start();
+}
+
+// ============================================================================
+// enterDeepSleep — hold power latch, set wake sources, sleep
+// ============================================================================
+void enterDeepSleep(int intervalSec) {
+    Serial.printf("[DeepSleep] Sleeping %d s\n", intervalSec);
+    Serial.flush();
+
+    // Turn off charge LED before sleeping
+    batteryUpdateChargeLED(false);
+
+    // Turn off WiFi
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+
+    // Suspend audio codec to save power
+    audioSuspend();
+
+    // Hold power latch HIGH during deep sleep
+    gpio_hold_en((gpio_num_t)VBAT_PWR_PIN);
+    gpio_deep_sleep_hold_en();
+
+    // Wake on either button (ext1 — ANY_LOW)
+    uint64_t buttonMask = (1ULL << BOOT_BUTTON) | (1ULL << PWR_BUTTON);
+    esp_sleep_enable_ext1_wakeup(buttonMask, ESP_EXT1_WAKEUP_ANY_LOW);
+
+    // Wake on timer
+    esp_sleep_enable_timer_wakeup((uint64_t)intervalSec * 1000000ULL);
+
+    esp_deep_sleep_start();
+    // Never returns
 }
 
 // ============================================================================
@@ -788,19 +1116,16 @@ void handleMenu() {
             case MENU_AUTH_STATUS: {
                 bool tokenOk;
                 long expSec;
-                bool hasRefresh;
                 if (g_settings.platform == PLATFORM_ZOOM) {
                     tokenOk    = zoomHasValidToken();
                     expSec     = zoomGetTokenExpirySeconds();
-                    hasRefresh = false;  // Zoom S2S has no refresh token
                 } else {
                     tokenOk    = hasValidToken();
                     expSec     = getTokenExpirySeconds();
-                    hasRefresh = hasStoredRefreshToken();
                 }
-                drawAuthInfoScreen(tokenOk, expSec, hasRefresh,
+                drawAuthInfoScreen(tokenOk, expSec,
                                    g_lastAvailability.c_str(), true);
-                // BOOT = close, PWR = factory reset
+                // BOOT = back to menu, PWR = factory reset
                 while (true) {
                     if (digitalRead(BOOT_BUTTON) == LOW) {
                         delay(200);

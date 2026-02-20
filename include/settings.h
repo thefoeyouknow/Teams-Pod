@@ -22,6 +22,14 @@ struct PodSettings {
     bool audioAlerts      = false;   // false = silent
     int  presenceInterval = 120;     // seconds between presence polls
     int  fullRefreshEvery = 10;      // full refresh every N partial updates
+    // Office hours deep-sleep schedule
+    String  timezone           = "";
+    bool    officeHoursEnabled = false;
+    int     officeStartHour    = 8;
+    int     officeStartMin     = 0;
+    int     officeEndHour      = 17;
+    int     officeEndMin       = 0;
+    uint8_t officeDays         = 0x1F;  // Mon-Fri bitmask
 };
 
 // Load settings: tries SD card first, then NVS fallback.

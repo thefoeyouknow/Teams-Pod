@@ -12,12 +12,13 @@
 extern GxEPD2_BW<WS_EPD154V2, WS_EPD154V2::HEIGHT> display;
 
 // Firmware version — single source of truth
-#define FW_VERSION "0.14.000"
+#define FW_VERSION "0.15.000"
 
 // ---- Screen-drawing functions ----
 void drawSplashScreen(const char* platformLabel = nullptr);  // boot splash
 void drawSetupScreen();
 void drawQRAuthScreen(const char* userCode, const char* qrUrl);
+void drawAuthCodeScreen(const char* userCode);
 void drawStatusScreen(const char* availability, const char* activity);
 void drawErrorScreen(const char* title, const char* detail);
 void drawShutdownScreen();
@@ -54,7 +55,7 @@ void drawDeviceInfoScreen(const char* ssid, const char* ip,
                           const char* sdInfo = nullptr,
                           bool partial = false);
 void drawAuthInfoScreen(bool tokenValid, long expirySeconds,
-                        bool hasRefresh, const char* lastStatus,
+                        const char* lastStatus,
                         bool partial = false);
 
 // ---- Lights screen ----

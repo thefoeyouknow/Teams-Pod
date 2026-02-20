@@ -16,6 +16,8 @@
 #define BLE_CHAR_LIGHT_AUX      "0001ff09-0000-1000-8000-00805f9b34fb"
 #define BLE_CHAR_CLIENT_SECRET  "0001ff0a-0000-1000-8000-00805f9b34fb"
 #define BLE_CHAR_PLATFORM       "0001ff0b-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_TIMEZONE       "0001ff0c-0000-1000-8000-00805f9b34fb"
+#define BLE_CHAR_OFFICE_HOURS   "0001ff0d-0000-1000-8000-00805f9b34fb"
 
 // NVS Storage Keys
 #define NVS_NAMESPACE           "puck_creds"
@@ -26,6 +28,7 @@
 
 // Function declarations
 void initializeBLE();
+void deinitBLE();
 void startBLEAdvertising();
 void stopBLEAdvertising();
 bool hasStoredCredentials();
@@ -44,5 +47,7 @@ extern String g_light_key;
 extern String g_light_aux;
 extern String g_client_secret;
 extern String g_platform;
+extern String g_timezone;
+extern String g_office_hours;
 
 #endif
