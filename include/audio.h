@@ -36,10 +36,10 @@ void audioTone(int freqHz, int durationMs);
 
 // --- Canned sound effects ---
 
-// Short click for button presses (~30ms, 4kHz)
+// Short click for button presses — plays /audio/click.mp3 or fallback tone
 void audioClick();
 
-// Short beep (~100ms, 2kHz)
+// Short beep (~100ms, 2kHz) — plays /audio/click.mp3 or fallback tone
 void audioBeep();
 
 // Confirmation tone (two ascending beeps)
@@ -48,8 +48,18 @@ void audioConfirm();
 // Error/warning tone (low buzz)
 void audioError();
 
-// Attention tone — plays the startup test tone 3 times.
-// Used when token renewal requires user action.  Blocking.
+// Status-change notification — plays /audio/notify.mp3 or fallback tone
+void audioNotify();
+
+// Attention tone — plays /audio/attention.mp3, repeated `repeats` times.
+// Falls back to synthesized tone if MP3 not found.  Blocking.
 void audioAttention(int repeats = 3);
+
+// --- MP3 playback ---
+
+// Play an MP3 file from SD card.  Returns true on success, false if
+// the file is missing / unreadable (caller should fall back to a tone).
+// The caller is responsible for calling audioAutoSuspend() afterwards.
+bool audioPlayMP3(const char* path);
 
 #endif

@@ -97,23 +97,6 @@ static void drawBatteryIcon(uint16_t fg, uint16_t bg, bool large = false) {
         int fillH  = (innerH * pct) / 100;
         if (fillH > 0)
             display.fillRect(ix + 2, bodyY + 2 + (innerH - fillH), innerW, fillH, fg);
-
-        // Percent text above icon (size 2 = 12px tall)
-        char buf[8];
-        if (usb) snprintf(buf, sizeof(buf), "USB");
-        else     snprintf(buf, sizeof(buf), "%d%%", pct);
-
-        display.setFont(NULL);
-        display.setTextSize(2);
-        display.setTextColor(fg);
-
-        int16_t x1, y1;
-        uint16_t tw2, th2;
-        display.getTextBounds(buf, 0, 0, &x1, &y1, &tw2, &th2);
-        // Centre text horizontally over the icon, place above tip
-        display.setCursor(ix + (bw - (int)tw2) / 2 - x1, iy - th2 - 3);
-        display.print(buf);
-        display.setTextSize(1);  // reset after large battery text
     } else {
         // --- Compact vertical battery icon for menu screens ---
         const int bw = 11, bh = 22;
@@ -137,21 +120,6 @@ static void drawBatteryIcon(uint16_t fg, uint16_t bg, bool large = false) {
         int fillH  = (innerH * pct) / 100;
         if (fillH > 0)
             display.fillRect(ix + 2, bodyY + 2 + (innerH - fillH), innerW, fillH, fg);
-
-        char buf[8];
-        if (usb) snprintf(buf, sizeof(buf), "USB");
-        else     snprintf(buf, sizeof(buf), "%d%%", pct);
-
-        display.setFont(NULL);
-        display.setTextSize(1);
-        display.setTextColor(fg);
-
-        int16_t x1, y1;
-        uint16_t tw2, th2;
-        display.getTextBounds(buf, 0, 0, &x1, &y1, &tw2, &th2);
-        // Text above icon
-        display.setCursor(ix + (bw - (int)tw2) / 2 - x1, iy - th2 - 2);
-        display.print(buf);
     }
 
     Serial.printf("[Batt] %.2fV  %d%%  %s\n", voltage, pct, usb ? "USB" : "BATT");
@@ -199,6 +167,13 @@ void drawSplashScreen(const char* platformLabel) {
                 display.fillScreen(GxEPD_WHITE);
                 display.drawBitmap(0, 0, bmpBuf, 200, 200, GxEPD_WHITE, GxEPD_BLACK);
                 drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE, true);
+                // Boot prompt — gear icon + text, bottom-left
+                display.setFont(NULL);
+                display.setTextSize(1);
+                display.setTextColor(GxEPD_BLACK);
+                drawGearIcon(10, 192, 3, GxEPD_BLACK, GxEPD_WHITE);
+                display.setCursor(18, 189);
+                display.print("Press to start");
             } while (display.nextPage());
             Serial.printf("[UI] BMP Splash: %s\n", splashPath);
             return;
@@ -268,22 +243,13 @@ void drawSplashScreen(const char* platformLabel) {
         display.setCursor(barX + barW + tipW + 6, barY + 4);
         display.print(battStr);
 
-        // "Press ⚙ to start" with drawn gear icon
+        // Boot prompt — gear icon + text, bottom-left
         display.setFont(NULL);
         display.setTextSize(1);
-        const char* pressMsg = "Press     to start";
-        int16_t x1, y1;
-        uint16_t tw, th;
-        display.getTextBounds(pressMsg, 0, 0, &x1, &y1, &tw, &th);
-        int msgX = (200 - tw) / 2 - x1;
-        int msgY = 180;
-        display.setCursor(msgX, msgY);
-        display.print("Press ");
-        int gearX = display.getCursorX() + 5;
-        int gearY = msgY + 3;
-        drawGearIcon(gearX, gearY, 4, GxEPD_BLACK, GxEPD_WHITE);
-        display.setCursor(gearX + 8, msgY);
-        display.print(" to start");
+        display.setTextColor(GxEPD_BLACK);
+        drawGearIcon(10, 192, 3, GxEPD_BLACK, GxEPD_WHITE);
+        display.setCursor(18, 189);
+        display.print("Press to start");
 
     } while (display.nextPage());
 
@@ -803,8 +769,6 @@ void drawMenuScreen(int selected, const PodSettings& settings,
         display.setCursor(110, 183);
         display.print("PWR=Sel");
 
-        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
-
     } while (display.nextPage());
 
     Serial.printf("[UI] Menu drawn, selected=%d\n", selected);
@@ -818,14 +782,17 @@ void drawSettingsScreen(int selected, const PodSettings& settings,
                         const LightConfig& light, bool partial) {
     const char* labels[SET_COUNT];
     static char lightLabel[24];
+    static char pollLabel[24];
     snprintf(lightLabel, sizeof(lightLabel), "Light: %s", lightTypeName(light.type));
+    snprintf(pollLabel, sizeof(pollLabel), "Poll: %ds", settings.presenceInterval);
 
-    labels[SET_LIGHT_TYPE]  = lightLabel;
-    labels[SET_LIGHT_TEST]  = "Test Light";
-    labels[SET_INVERT]      = settings.invertDisplay ? "Invert: ON"  : "Invert: OFF";
-    labels[SET_AUDIO]       = settings.audioAlerts   ? "Audio: ON"   : "Audio: OFF";
-    labels[SET_BLE_SETUP]   = "BLE Setup";
-    labels[SET_BACK]        = "< Back";
+    labels[SET_LIGHT_TYPE]    = lightLabel;
+    labels[SET_LIGHT_TEST]    = "Test Light";
+    labels[SET_INVERT]        = settings.invertDisplay ? "Invert: ON"  : "Invert: OFF";
+    labels[SET_AUDIO]         = settings.audioAlerts   ? "Audio: ON"   : "Audio: OFF";
+    labels[SET_POLL_INTERVAL] = pollLabel;
+    labels[SET_BLE_SETUP]     = "BLE Setup";
+    labels[SET_BACK]          = "< Back";
 
     if (partial)
         display.setPartialWindow(0, 0, 200, 200);
@@ -845,10 +812,10 @@ void drawSettingsScreen(int selected, const PodSettings& settings,
         // Separator
         display.drawLine(10, 32, 190, 32, GxEPD_BLACK);
 
-        // Settings items — 6 items, 22px spacing
+        // Settings items — 20px spacing to fit all items
         display.setFont(&FreeSansBold9pt7b);
         for (int i = 0; i < SET_COUNT; i++) {
-            int y = 55 + i * 22;
+            int y = 52 + i * 20;
             if (i == selected) {
                 display.fillRect(5, y - 13, 190, 18, GxEPD_BLACK);
                 display.setTextColor(GxEPD_WHITE);
@@ -871,8 +838,6 @@ void drawSettingsScreen(int selected, const PodSettings& settings,
         display.setCursor(110, 183);
         display.print("PWR=Sel");
 
-        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
-
     } while (display.nextPage());
 
     Serial.printf("[UI] Settings drawn, selected=%d\n", selected);
@@ -885,7 +850,7 @@ void drawSettingsScreen(int selected, const PodSettings& settings,
 void drawDeviceInfoScreen(const char* ssid, const char* ip,
                           const char* clientId, const char* tenantId,
                           float battV, int battPct,
-                          const char* sdInfo, bool partial)
+                          bool outsideOfficeHours, bool partial)
 {
     // Truncate long IDs
     char clientShort[20], tenantShort[20];
@@ -894,6 +859,16 @@ void drawDeviceInfoScreen(const char* ssid, const char* ip,
 
     char battBuf[16];
     snprintf(battBuf, sizeof(battBuf), "%.2fV  %d%%", battV, battPct);
+
+    // Format local time for clock row
+    char timeBuf[20];
+    struct tm t;
+    if (getLocalTime(&t, 100)) {
+        snprintf(timeBuf, sizeof(timeBuf), "%02d/%02d %02d:%02d",
+                 t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min);
+    } else {
+        snprintf(timeBuf, sizeof(timeBuf), "No sync");
+    }
 
     if (partial)
         display.setPartialWindow(0, 0, 200, 200);
@@ -928,7 +903,14 @@ void drawDeviceInfoScreen(const char* ssid, const char* ip,
         y += lineH;
         display.setCursor(6, y); display.printf("Batt:%s", battBuf);
         y += lineH;
-        display.setCursor(6, y); display.printf("SD:%s", sdInfo ? sdInfo : "No card");
+        if (outsideOfficeHours) {
+            display.fillRect(1, y - 1, 198, lineH, GxEPD_BLACK);
+            display.setTextColor(GxEPD_WHITE);
+        }
+        display.setCursor(6, y); display.printf("Time:%s", timeBuf);
+        if (outsideOfficeHours) {
+            display.setTextColor(GxEPD_BLACK);
+        }
         y += lineH;
 
         char verBuf[16];
@@ -1020,8 +1002,8 @@ void drawAuthInfoScreen(bool tokenValid, long expirySeconds,
 
 void drawLightsScreen(int selected, const std::vector<LightDevice>& devs,
                       int scrollOffset, bool partial) {
-    // Total items = 2 fixed (Discover, Provision All) + devices + Back
-    int totalItems = 2 + (int)devs.size() + 1;  // +1 for Back
+    // Total items = 3 fixed (Discover, Provision All, Setup New) + devices + Back
+    int totalItems = 3 + (int)devs.size() + 1;  // +1 for Back
 
     const int maxVisible = 6;   // max items visible at once
     const int itemH = 20;       // pixels per row
@@ -1065,11 +1047,13 @@ void drawLightsScreen(int selected, const std::vector<LightDevice>& devs,
                 display.print("Discover");
             } else if (idx == 1) {
                 display.print("Provision All");
+            } else if (idx == 2) {
+                display.print("Setup New");
             } else if (idx == totalItems - 1) {
                 display.print("< Back");
             } else {
                 // Device entry
-                int devIdx = idx - 2;
+                int devIdx = idx - 3;
                 if (devIdx >= 0 && devIdx < (int)devs.size()) {
                     const LightDevice& d = devs[devIdx];
                     String label = d.name;
@@ -1110,7 +1094,6 @@ void drawLightsScreen(int selected, const std::vector<LightDevice>& devs,
         display.print("Next");
         display.setCursor(110, 183);
         display.print("PWR=Sel");
-        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
 
     } while (display.nextPage());
 
@@ -1179,10 +1162,119 @@ void drawLightActionScreen(const LightDevice& dev, int selected, bool partial) {
         display.print("Next");
         display.setCursor(110, 183);
         display.print("PWR=Sel");
-        drawBatteryIcon(GxEPD_BLACK, GxEPD_WHITE);
 
     } while (display.nextPage());
 
     Serial.printf("[UI] Light action screen: %s, sel=%d\n",
                   dev.name.c_str(), selected);
+}
+
+// ============================================================================
+// WLED Provisioning — progress screen (partial update for speed)
+// ============================================================================
+
+void drawProvisioningScreen(const char* step, const char* detail) {
+    display.setPartialWindow(0, 0, 200, 200);
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("WLED Setup", 30);
+        display.drawLine(10, 38, 190, 38, GxEPD_BLACK);
+
+        // Spinner dots (visual indicator that something is happening)
+        static int dotPhase = 0;
+        display.setFont(NULL);
+        display.setTextSize(2);
+        display.setCursor(80, 55);
+        for (int i = 0; i < 3; i++) {
+            display.print((i == (dotPhase % 3)) ? "O" : "o");
+            display.print(" ");
+        }
+        dotPhase++;
+
+        // Step text (main action)
+        display.setFont(&FreeSansBold9pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText(step, 100);
+
+        // Detail text (smaller, optional)
+        if (detail && strlen(detail) > 0) {
+            display.setFont(NULL);
+            display.setTextSize(1);
+            centerText(detail, 125);
+        }
+
+        // Bottom hint
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("Please wait...", 180);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Provisioning: %s — %s\n", step, detail ? detail : "");
+}
+
+// ============================================================================
+// WLED Provisioning — result screen (success or error)
+// ============================================================================
+
+void drawProvisioningResult(bool success, const char* message) {
+    display.setPartialWindow(0, 0, 200, 200);
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.drawRect(0, 0, 200, 200, GxEPD_BLACK);
+
+        // Title
+        display.setFont(&FreeSansBold12pt7b);
+        display.setTextColor(GxEPD_BLACK);
+        centerText("WLED Setup", 30);
+        display.drawLine(10, 38, 190, 38, GxEPD_BLACK);
+
+        // Result icon — large checkmark or X
+        display.setFont(&FreeSansBold24pt7b);
+        if (success) {
+            centerText("OK", 85);
+        } else {
+            centerText("FAIL", 85);
+        }
+
+        // Message
+        display.setFont(NULL);
+        display.setTextSize(1);
+        display.setTextColor(GxEPD_BLACK);
+
+        // Word-wrap the message into ~28-char lines
+        String msg(message);
+        int y = 110;
+        while (msg.length() > 0 && y < 170) {
+            String line;
+            if ((int)msg.length() <= 28) {
+                line = msg;
+                msg = "";
+            } else {
+                int sp = msg.lastIndexOf(' ', 28);
+                if (sp <= 0) sp = 28;
+                line = msg.substring(0, sp);
+                msg = msg.substring(sp + 1);
+            }
+            centerText(line.c_str(), y);
+            y += 12;
+        }
+
+        // Button hint
+        display.setFont(NULL);
+        display.setTextSize(2);
+        centerText("Press any key", 185);
+
+    } while (display.nextPage());
+
+    Serial.printf("[UI] Provisioning result: %s — %s\n",
+                  success ? "OK" : "FAIL", message);
 }

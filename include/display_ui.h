@@ -12,7 +12,7 @@
 extern GxEPD2_BW<WS_EPD154V2, WS_EPD154V2::HEIGHT> display;
 
 // Firmware version — single source of truth
-#define FW_VERSION "0.15.000"
+#define FW_VERSION "0.15.005"
 
 // ---- Screen-drawing functions ----
 void drawSplashScreen(const char* platformLabel = nullptr);  // boot splash
@@ -40,6 +40,7 @@ enum SettingsItem {
     SET_LIGHT_TEST,
     SET_INVERT,
     SET_AUDIO,
+    SET_POLL_INTERVAL,
     SET_BLE_SETUP,
     SET_BACK,
     SET_COUNT
@@ -52,16 +53,21 @@ void drawSettingsScreen(int selected, const PodSettings& settings,
 void drawDeviceInfoScreen(const char* ssid, const char* ip,
                           const char* clientId, const char* tenantId,
                           float battV, int battPct,
-                          const char* sdInfo = nullptr,
+                          bool outsideOfficeHours = false,
                           bool partial = false);
 void drawAuthInfoScreen(bool tokenValid, long expirySeconds,
                         const char* lastStatus,
                         bool partial = false);
 
+// ---- WLED Provisioning progress screen ----
+void drawProvisioningScreen(const char* step, const char* detail = nullptr);
+void drawProvisioningResult(bool success, const char* message);
+
 // ---- Lights screen ----
 enum LightsItem {
     LIGHTS_DISCOVER = 0,
     LIGHTS_PROVISION_ALL,
+    LIGHTS_SETUP_NEW,      // WLED zero-config provisioning
     LIGHTS_FIRST_DEVICE,   // dynamic entries start here
 };
 

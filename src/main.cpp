@@ -23,6 +23,7 @@
 #include <driver/gpio.h>
 #include <time.h>
 #include <driver/rtc_io.h>
+#include <Preferences.h>
 
 #include "ble_setup.h"
 #include "display_ui.h"
@@ -36,6 +37,7 @@
 #include "audio.h"
 #include "light_control.h"
 #include "light_devices.h"
+#include "wled_provision.h"
 
 // ============================================================================
 // Hardware pins  (Waveshare ESP32-S3-ePaper-1.54 V2)
@@ -109,6 +111,7 @@ void checkPowerOff();
 void updateAndDisplayPresence();
 void handleMenu();
 void handleSettings();
+void runWledZeroConfig();
 void waitForAnyButton();
 void checkBattery();
 void enterDeepSleep(int intervalSec);
@@ -203,6 +206,7 @@ void setup() {
             g_lightCfg.type     = (LightType)g_light_type.toInt();
             g_lightCfg.ip       = g_light_ip;
             g_settings.platform = (Platform)g_platform.toInt();
+            if (g_timezone.length() > 0) g_settings.timezone = g_timezone;
 
             // --- WiFi connect (need 240 MHz for radio) ---
             setCpuFrequencyMhz(240);
@@ -356,9 +360,14 @@ normalBoot:
     g_lightCfg.ip   = g_light_ip;
     // Sync platform from BLE credential store into settings
     g_settings.platform = (Platform)g_platform.toInt();
+    // Sync timezone from BLE → settings (BLE is authority, SD may be stale)
+    if (g_timezone.length() > 0) {
+        g_settings.timezone = g_timezone;
+    }
     Serial.printf("[Main] Platform: %s  SSID: %s  Client: %s  Tenant: %s\n",
                   platformName(g_settings.platform),
                   g_ssid.c_str(), g_client_id.c_str(), g_tenant_id.c_str());
+    Serial.printf("[Main] Timezone: %s\n", g_settings.timezone.c_str());
 
     // --- WiFi ---
     g_state = STATE_CONNECTING_WIFI;
@@ -390,6 +399,24 @@ normalBoot:
         Serial.println("[Main] Battery mode — using cached light devices");
     }
 
+    // --- WLED zero-config auto-trigger (set during BLE first setup) ---
+    {
+        Preferences wp;
+        wp.begin("pod_settings", true);  // read-only
+        bool wledNew = wp.getBool("wled_new", false);
+        wp.end();
+        if (wledNew) {
+            Serial.println("[Main] WLED new-device flag found — running zero-config");
+            runWledZeroConfig();
+            // Clear the flag so it doesn't run again
+            Preferences wp2;
+            wp2.begin("pod_settings", false);
+            wp2.remove("wled_new");
+            wp2.end();
+            Serial.println("[Main] WLED new-device flag cleared");
+        }
+    }
+
     // --- Auth: platform-specific ---
     if (g_settings.platform == PLATFORM_ZOOM) {
         // Zoom S2S OAuth — automatic, no user interaction
@@ -406,8 +433,17 @@ normalBoot:
         // Teams Device Code Flow
         loadAuthFromNVS();
         if (hasStoredRefreshToken()) {
-            Serial.println("[Main] Attempting token refresh...");
-            if (refreshAccessToken(g_client_id, g_tenant_id)) {
+            // Retry refresh up to 3 times — deep sleep wake may have
+            // transient network issues (DNS, TLS) that resolve quickly.
+            bool refreshed = false;
+            for (int attempt = 1; attempt <= 3 && !refreshed; attempt++) {
+                Serial.printf("[Main] Token refresh attempt %d/3...\n", attempt);
+                refreshed = refreshAccessToken(g_client_id, g_tenant_id);
+                if (!refreshed && hasStoredRefreshToken() && attempt < 3) {
+                    delay(2000);  // brief pause before retry
+                }
+            }
+            if (refreshed) {
                 g_state = STATE_RUNNING;
                 g_lastPresenceCheck = 0;
                 updateAndDisplayPresence();
@@ -439,6 +475,13 @@ normalBoot:
 // loop()
 // ============================================================================
 void loop() {
+    // Update charge LED every iteration (covers all states)
+    static unsigned long lastLedCheck = 0;
+    if (millis() - lastLedCheck >= 5000) {
+        lastLedCheck = millis();
+        batteryUpdateChargeLED(batteryOnUSB(batteryReadVoltage()));
+    }
+
     switch (g_state) {
 
     // ---- BLE setup: just wait for callbacks ----------------------------
@@ -691,8 +734,9 @@ void initializeHardware() {
     digitalWrite(EPD_PWR_PIN, LOW);
     delay(200);
 
-    // Battery ADC
+    // Battery ADC + charge LED
     batteryInit();
+    batteryUpdateChargeLED(batteryOnUSB(batteryReadVoltage()));
 
     // GxEPD2 display
     display.init(115200, true, 20, false, SPI,
@@ -748,6 +792,7 @@ void updateAndDisplayPresence() {
                                  st.activity.c_str());
                 lightSetPresence(g_lightCfg, st.availability.c_str());
                 g_lastAvailability = st.availability;
+                if (g_settings.audioAlerts) audioNotify();
             } else {
                 Serial.printf("[Main] Unchanged: %s\n",
                               st.availability.c_str());
@@ -774,6 +819,7 @@ void updateAndDisplayPresence() {
                                  st.activity.c_str());
                 lightSetPresence(g_lightCfg, st.availability.c_str());
                 g_lastAvailability = st.availability;
+                if (g_settings.audioAlerts) audioNotify();
             } else {
                 Serial.printf("[Main] Unchanged: %s\n",
                               st.availability.c_str());
@@ -996,6 +1042,39 @@ void handleLightAction(LightDevice& dev) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WLED zero-config provisioning flow (called from Lights → Setup New)
+// ---------------------------------------------------------------------------
+void runWledZeroConfig() {
+    drawProvisioningScreen("Connecting to", "WLED-AP ...");
+
+    WledProvResult res = wledZeroConfig(g_ssid, g_password);
+
+    switch (res) {
+        case WLED_PROV_OK:
+            drawProvisioningScreen("Running", "discovery ...");
+            lightDiscoverAll(g_lightCfg);
+            drawProvisioningResult(true, "WLED device\nconfigured!");
+            break;
+        case WLED_PROV_AP_FAIL:
+            drawProvisioningResult(false, "Could not connect\nto WLED-AP");
+            break;
+        case WLED_PROV_HTTP_FAIL:
+            drawProvisioningResult(false, "Error: please\nmanually configure\nyour device");
+            break;
+        case WLED_PROV_REJOIN_FAIL:
+            drawProvisioningResult(false, "Config sent but\ncould not rejoin\nhome WiFi");
+            break;
+    }
+
+    // Wait for button press to dismiss
+    while (digitalRead(BOOT_BUTTON) == HIGH && digitalRead(PWR_BUTTON) == HIGH) {
+        delay(50);
+    }
+    delay(200);
+    while (digitalRead(BOOT_BUTTON) == LOW || digitalRead(PWR_BUTTON) == LOW) delay(50);
+}
+
 void handleLights() {
     Serial.println("[Lights] Entering lights submenu");
     auto& devs = lightDevicesGet();
@@ -1007,7 +1086,7 @@ void handleLights() {
     drawLightsScreen(selected, devs, scrollOffset);
 
     while (true) {
-        int totalItems = 2 + (int)devs.size() + 1;  // Discover + Provision All + devices + Back
+        int totalItems = 3 + (int)devs.size() + 1;  // Discover + Provision All + Setup New + devices + Back
 
         if (digitalRead(BOOT_BUTTON) == LOW) {
             delay(200);
@@ -1041,13 +1120,18 @@ void handleLights() {
                 int count = wledProvisionAll();
                 Serial.printf("[Lights] Provisioned %d device(s)\n", count);
                 drawLightsScreen(selected, devs, scrollOffset, true);
+            } else if (selected == 2) {
+                // Setup New — WLED zero-config provisioning
+                Serial.println("[Lights] WLED zero-config starting...");
+                runWledZeroConfig();
+                drawLightsScreen(selected, devs, scrollOffset, true);
             } else if (selected == totalItems - 1) {
                 // Back
                 Serial.println("[Lights] Back to main menu");
                 return;
             } else {
                 // Device entry — open action screen
-                int devIdx = selected - 2;
+                int devIdx = selected - 3;
                 if (devIdx >= 0 && devIdx < (int)devs.size()) {
                     handleLightAction(devs[devIdx]);
                     drawLightsScreen(selected, devs, scrollOffset, true);
@@ -1092,10 +1176,10 @@ void handleMenu() {
                 float bv = batteryReadVoltage();
                 int bp = batteryPercent(bv);
                 String ip = WiFi.localIP().toString();
-                String sd = sdMounted() ? sdCardInfo() : String("No card");
+                bool outsideOH = g_settings.officeHoursEnabled && !isOfficeHours();
                 drawDeviceInfoScreen(g_ssid.c_str(), ip.c_str(),
                                      g_client_id.c_str(), g_tenant_id.c_str(),
-                                     bv, bp, sd.c_str(), true);
+                                     bv, bp, outsideOH, true);
                 // BOOT = close, PWR = reboot
                 while (true) {
                     if (digitalRead(BOOT_BUTTON) == LOW) {
@@ -1227,11 +1311,31 @@ void handleSettings() {
                 drawSettingsScreen(selected, g_settings, g_lightCfg, true);
                 break;
 
+            case SET_POLL_INTERVAL: {
+                // Cycle through 30 → 60 → 90 → 120 → 30
+                const int intervals[] = {30, 60, 90, 120};
+                int idx = 0;
+                for (int i = 0; i < 4; i++) {
+                    if (g_settings.presenceInterval == intervals[i]) { idx = i; break; }
+                }
+                idx = (idx + 1) % 4;
+                g_settings.presenceInterval = intervals[idx];
+                saveSettings(g_settings);
+                Serial.printf("[Settings] Poll interval → %ds\n", g_settings.presenceInterval);
+                drawSettingsScreen(selected, g_settings, g_lightCfg, true);
+                break;
+            }
+
             case SET_BLE_SETUP: {
                 Serial.println("[Settings] Starting BLE setup");
+                initializeBLE();       // re-init after deinitBLE()
+                loadCredentialsFromNVS();  // populate globals for onRead
                 drawSetupScreen();
                 startBLEAdvertising();
                 waitForAnyButton();
+                stopBLEAdvertising();
+                deinitBLE();           // free RAM again
+                loadSettings(g_settings);
                 loadLightConfig(g_lightCfg);
                 drawSettingsScreen(selected, g_settings, g_lightCfg, true);
                 break;

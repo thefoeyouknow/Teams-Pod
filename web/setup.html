@@ -28,6 +28,8 @@ button{width:100%;padding:12px;border:none;border-radius:8px;font-size:1rem;font
 .fields{display:none}
 .help{font-size:.75rem;color:#666;margin-top:4px}
 .help a{color:#5c9eff}
+.checkbox-label{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:.85rem;color:#ccc;cursor:pointer}
+.checkbox-label input[type="checkbox"]{width:18px;height:18px;accent-color:#5c9eff}
 .hidden{display:none!important}
 .platform-tabs{display:flex;gap:0;margin-bottom:16px;border-radius:8px;overflow:hidden;border:1px solid #333}
 .platform-tabs button{flex:1;padding:10px;border:none;background:#0f3460;color:#888;font-size:.95rem;font-weight:600;cursor:pointer;margin:0;border-radius:0;transition:all .2s}
@@ -98,6 +100,8 @@ button{width:100%;padding:12px;border:none;border-radius:8px;font-size:1rem;font
     <!-- WLED help -->
     <div id="wledFields" class="hidden">
       <p class="help">WLED devices are <strong>auto-discovered</strong> via mDNS. No IP needed unless discovery fails. Use the <em>Lights</em> menu on the Pod to manage and provision devices with status presets.</p>
+      <label class="checkbox-label"><input type="checkbox" id="wledNew"> This is a <strong>new / factory-fresh</strong> WLED device</label>
+      <p class="help">If checked, the Pod will automatically push your WiFi credentials to the WLED device on next boot.</p>
     </div>
 
     <!-- WiZ fields -->
@@ -194,7 +198,8 @@ const UUID = {
   clientSecret: '0001ff0a-0000-1000-8000-00805f9b34fb',
   platform:     '0001ff0b-0000-1000-8000-00805f9b34fb',
   timezone:     '0001ff0c-0000-1000-8000-00805f9b34fb',
-  officeHours:  '0001ff0d-0000-1000-8000-00805f9b34fb'
+  officeHours:  '0001ff0d-0000-1000-8000-00805f9b34fb',
+  wledNew:      '0001ff0e-0000-1000-8000-00805f9b34fb'
 };
 
 let svc = null;
@@ -361,6 +366,11 @@ $('btnSave').addEventListener('click', async () => {
     await write(UUID.tenantId, tenantId);
     await write(UUID.clientSecret, clientSecret);
     await write(UUID.lightType, $('lightType').value);
+
+    // If WLED + new device checked, send the flag
+    if ($('lightType').value === '1' && $('wledNew').checked) {
+      await write(UUID.wledNew, '1');
+    }
 
     // Write light IP from the correct field per type
     const lt = $('lightType').value;

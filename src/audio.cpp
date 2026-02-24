@@ -18,6 +18,11 @@
 #include <Wire.h>
 #include <driver/i2s.h>
 #include <math.h>
+#include <FS.h>
+#include <SD_MMC.h>
+#include "MP3DecoderHelix.h"
+
+using namespace libhelix;
 
 // ---- Hardware pins ----
 #define AUDIO_PWR_PIN     42    // Audio power rail — ACTIVE LOW
@@ -323,15 +328,107 @@ static void audioAutoSuspend() {
     audioSuspend();
 }
 
+// ---- MP3 playback (Helix decoder → I2S resampler) ----
+//
+// Decodes MP3 from SD, resamples to 16 kHz, converts to 32-bit stereo
+// and writes through the existing I2S pipeline.
+
+static void mp3DataCallback(MP3FrameInfo &info, int16_t *pcm, size_t len, void*) {
+    if (len == 0 || info.nChans == 0) return;
+
+    int srcRate   = info.samprate;
+    int nChans    = info.nChans;
+    int srcFrames = (int)(len / nChans);   // samples per channel
+
+    // Output frames at our I2S sample rate
+    int dstFrames = (srcRate == SAMPLE_RATE)
+                        ? srcFrames
+                        : (int)((int64_t)srcFrames * SAMPLE_RATE / srcRate);
+    if (dstFrames <= 0) return;
+
+    const int BLOCK = 128;
+    int32_t outBuf[BLOCK * 2];  // stereo 32-bit
+    size_t  written;
+
+    for (int i = 0; i < dstFrames; ) {
+        int count = (dstFrames - i < BLOCK) ? dstFrames - i : BLOCK;
+        for (int j = 0; j < count; j++) {
+            int srcIdx;
+            if (srcRate == SAMPLE_RATE) {
+                srcIdx = i + j;
+            } else {
+                srcIdx = (int)((int64_t)(i + j) * srcRate / SAMPLE_RATE);
+                if (srcIdx >= srcFrames) srcIdx = srcFrames - 1;
+            }
+
+            int16_t sL, sR;
+            if (nChans >= 2) {
+                sL = pcm[srcIdx * 2];
+                sR = pcm[srcIdx * 2 + 1];
+            } else {
+                sL = sR = pcm[srcIdx];
+            }
+
+            outBuf[j * 2]     = (int32_t)sL << 16;   // MSB of 32-bit slot
+            outBuf[j * 2 + 1] = (int32_t)sR << 16;
+        }
+        i2s_write(I2S_PORT, outBuf, count * 8, &written, 200);
+        i += count;
+    }
+}
+
+bool audioPlayMP3(const char* path) {
+    if (!g_audioInitialized) return false;
+    if (g_audioSuspended) audioResume();
+
+    File f = SD_MMC.open(path, FILE_READ);
+    if (!f) {
+        Serial.printf("[Audio] MP3 not found: %s\n", path);
+        return false;
+    }
+
+    size_t fileSize = f.size();
+    if (fileSize == 0 || fileSize > 16384) {
+        Serial.printf("[Audio] MP3 bad size (%u): %s\n", fileSize, path);
+        f.close();
+        return false;
+    }
+
+    uint8_t* buf = (uint8_t*)malloc(fileSize);
+    if (!buf) {
+        Serial.println("[Audio] MP3 malloc failed");
+        f.close();
+        return false;
+    }
+    f.read(buf, fileSize);
+    f.close();
+
+    Serial.printf("[Audio] Playing MP3: %s (%u bytes)\n", path, fileSize);
+    audioEnable();
+
+    MP3DecoderHelix mp3(mp3DataCallback);
+    mp3.begin();
+    mp3.write(buf, fileSize);
+    mp3.end();
+
+    free(buf);
+
+    i2s_flush_dma();
+    audioDisable();
+    return true;
+}
+
 // ---- Canned effects ----
 
 void audioClick() {
-    audioTone(1000, 200);   // same as working startup test tone
+    if (audioPlayMP3("/audio/click.mp3")) { audioAutoSuspend(); return; }
+    audioTone(1000, 200);   // fallback synthesized tone
     audioAutoSuspend();
 }
 
 void audioBeep() {
-    audioTone(1000, 200);   // same as working startup test tone
+    if (audioPlayMP3("/audio/click.mp3")) { audioAutoSuspend(); return; }
+    audioTone(1000, 200);
     audioAutoSuspend();
 }
 
@@ -347,10 +444,20 @@ void audioError() {
     audioAutoSuspend();
 }
 
+void audioNotify() {
+    if (audioPlayMP3("/audio/notify.mp3")) { audioAutoSuspend(); return; }
+    // Fallback: two ascending tones (same as confirm)
+    audioTone(1800, 120);
+    delay(40);
+    audioTone(2400, 120);
+    audioAutoSuspend();
+}
+
 void audioAttention(int repeats) {
-    // Play the 1kHz test tone in repeating bursts — proven audible
     for (int i = 0; i < repeats; i++) {
-        audioTone(1000, 200);   // same tone that worked at startup
+        if (!audioPlayMP3("/audio/attention.mp3")) {
+            audioTone(1000, 200);   // fallback synthesized tone
+        }
         if (i < repeats - 1) delay(300);  // gap between bursts
     }
     audioAutoSuspend();

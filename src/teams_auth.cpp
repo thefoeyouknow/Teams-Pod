@@ -193,7 +193,13 @@ bool refreshAccessToken(const String& clientId, const String& tenantId) {
 
     if (httpCode != 200) {
         Serial.printf("[Auth] Refresh failed HTTP %d\n", httpCode);
-        s_refresh_token = "";   // invalidate – will force re-auth
+        // Only invalidate on definitive rejection (invalid_grant) —
+        // transient failures (network, DNS, timeout) should NOT erase
+        // the token so we can retry next cycle instead of forcing re-auth.
+        if (httpCode == 400 && payload.indexOf("invalid_grant") >= 0) {
+            Serial.println("[Auth] Refresh token revoked — clearing");
+            s_refresh_token = "";
+        }
         return false;
     }
 

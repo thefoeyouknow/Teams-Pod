@@ -16,6 +16,7 @@ String g_client_secret = "";
 String g_platform = "0";
 String g_timezone = "";
 String g_office_hours = "";
+String g_wled_new = "";
 
 // BLE objects
 static NimBLEServer *pServer = nullptr;
@@ -72,6 +73,14 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
         }
         sp.end();
       }
+      // Save WLED new-device flag if set
+      if (g_wled_new == "1") {
+        Preferences wp;
+        wp.begin("pod_settings", false);
+        wp.putBool("wled_new", true);
+        wp.end();
+        Serial.println("  → WLED new-device flag stored");
+      }
       // Also sync light config to pod_light namespace
       LightConfig lc;
       lc.type = (LightType)g_light_type.toInt();
@@ -110,6 +119,9 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
     } else if (uuid == BLE_CHAR_OFFICE_HOURS) {
       g_office_hours = String(value.c_str());
       Serial.printf("  -> OFFICE_HOURS set to: %s\n", g_office_hours.c_str());
+    } else if (uuid == BLE_CHAR_WLED_NEW) {
+      g_wled_new = String(value.c_str());
+      Serial.printf("  -> WLED_NEW set to: %s\n", g_wled_new.c_str());
     }
   }
 
@@ -137,6 +149,8 @@ class CharacteristicCallback : public NimBLECharacteristicCallbacks {
       pCharacteristic->setValue(std::string(g_timezone.c_str()));
     } else if (uuid == BLE_CHAR_OFFICE_HOURS) {
       pCharacteristic->setValue(std::string(g_office_hours.c_str()));
+    } else if (uuid == BLE_CHAR_WLED_NEW) {
+      pCharacteristic->setValue(std::string(g_wled_new.c_str()));
     }
   }
 };
@@ -352,10 +366,16 @@ void initializeBLE() {
                                  NIMBLE_PROPERTY::READ);
   pOfficeHours->setCallbacks(pCharCallback);
 
+  // WLED_NEW (Write + Read): "1" = new device needs zero-config
+  NimBLECharacteristic *pWledNew = pService->createCharacteristic(
+      BLE_CHAR_WLED_NEW, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+                             NIMBLE_PROPERTY::READ);
+  pWledNew->setCallbacks(pCharCallback);
+
   // Start service
   pService->start();
 
-  Serial.println("[BLE] ✓ Service created with 14 characteristics");
+  Serial.println("[BLE] \u2713 Service created with 15 characteristics");
 }
 
 /**
@@ -370,7 +390,8 @@ void startBLEAdvertising() {
     delay(100);
   }
 
-  // Configure on every call — idempotent, avoids stale state
+  // Reset advertising data to avoid duplicate UUIDs from repeated init/deinit
+  pAdv->removeServices();
   pAdv->addServiceUUID(NimBLEUUID((uint16_t)BLE_SERVICE_UUID));
   pAdv->setScanResponse(true);
   pAdv->setMinPreferred(0x06);
